@@ -19,7 +19,7 @@ type SearchRequest struct {
 	Query        map[string]interface{} `json:"query"`
 	From         int                    `json:"from,omitempty"`
 	Size         int                    `json:"size,omitempty"`
-	Sort         []map[string]string    `json:"sort,omitempty"`
+	Sort         []map[string]interface{} `json:"sort,omitempty"`
 	Aggregations map[string]interface{} `json:"aggregations,omitempty"`
 	Source       interface{}            `json:"_source,omitempty"`
 	Highlight    map[string]interface{} `json:"highlight,omitempty"`
@@ -73,6 +73,18 @@ func (b *Builder) Build() ([]byte, error) {
 	return json.Marshal(b.request)
 }
 
+// SetQuery 设置查询条件
+// 用于直接设置预定义的查询结构
+func (b *Builder) SetQuery(query map[string]interface{}) *Builder {
+	b.request.Query = query
+	return b
+}
+
+// GetRequest 获取搜索请求（用于内部访问）
+func (b *Builder) GetRequest() SearchRequest {
+	return b.request
+}
+
 // Match 添加匹配查询
 // 参数:
 //
@@ -104,6 +116,232 @@ func (b *Builder) MatchPhrase(field, query string) *Builder {
 	b.request.Query = map[string]interface{}{
 		"match_phrase": map[string]interface{}{
 			field: query,
+		},
+	}
+	return b
+}
+
+// MatchPhrasePrefix 添加短语前缀匹配查询（用于搜索建议）
+// 参数:
+//
+//	field: 字段名
+//	query: 查询前缀
+//
+// 返回:
+//
+//	*Builder: 构建器实例
+func (b *Builder) MatchPhrasePrefix(field, query string) *Builder {
+	b.request.Query = map[string]interface{}{
+		"match_phrase_prefix": map[string]interface{}{
+			field: query,
+		},
+	}
+	return b
+}
+
+// MultiMatch 添加多字段匹配查询
+// 参数:
+//
+//	query: 查询文本
+//	fields: 要搜索的字段列表
+//
+// 返回:
+//
+//	*Builder: 构建器实例
+func (b *Builder) MultiMatch(query string, fields []string) *Builder {
+	b.request.Query = map[string]interface{}{
+		"multi_match": map[string]interface{}{
+			"query":  query,
+			"fields": fields,
+		},
+	}
+	return b
+}
+
+// Exists 添加存在性查询（查询字段存在的文档）
+// 参数:
+//
+//	field: 字段名
+//
+// 返回:
+//
+//	*Builder: 构建器实例
+func (b *Builder) Exists(field string) *Builder {
+	b.request.Query = map[string]interface{}{
+		"exists": map[string]interface{}{
+			"field": field,
+		},
+	}
+	return b
+}
+
+// Prefix 添加前缀查询
+// 参数:
+//
+//	field: 字段名
+//	prefix: 前缀值
+//
+// 返回:
+//
+//	*Builder: 构建器实例
+func (b *Builder) Prefix(field string, prefix string) *Builder {
+	b.request.Query = map[string]interface{}{
+		"prefix": map[string]interface{}{
+			field: prefix,
+		},
+	}
+	return b
+}
+
+// Wildcard 添加通配符查询
+// 参数:
+//
+//	field: 字段名
+//	pattern: 通配符模式（支持*和?）
+//
+// 返回:
+//
+//	*Builder: 构建器实例
+func (b *Builder) Wildcard(field string, pattern string) *Builder {
+	b.request.Query = map[string]interface{}{
+		"wildcard": map[string]interface{}{
+			field: pattern,
+		},
+	}
+	return b
+}
+
+// Fuzzy 添加模糊查询（支持拼写错误纠正）
+// 参数:
+//
+//	field: 字段名
+//	query: 查询文本
+//
+// 返回:
+//
+//	*Builder: 构建器实例
+func (b *Builder) Fuzzy(field string, query string) *Builder {
+	b.request.Query = map[string]interface{}{
+		"fuzzy": map[string]interface{}{
+			field: query,
+		},
+	}
+	return b
+}
+
+// FuzzyWithFuzziness 添加模糊查询并指定模糊度
+// 参数:
+//
+//	field: 字段名
+//	query: 查询文本
+//	fuzziness: 模糊度（如"AUTO"或1, 2）
+//
+// 返回:
+//
+//	*Builder: 构建器实例
+func (b *Builder) FuzzyWithFuzziness(field string, query string, fuzziness interface{}) *Builder {
+	b.request.Query = map[string]interface{}{
+		"fuzzy": map[string]interface{}{
+			field: map[string]interface{}{
+				"value":      query,
+				"fuzziness":  fuzziness,
+			},
+		},
+	}
+	return b
+}
+
+// MatchAll 添加匹配所有文档查询
+// 返回:
+//
+//	*Builder: 构建器实例
+func (b *Builder) MatchAll() *Builder {
+	b.request.Query = map[string]interface{}{
+		"match_all": map[string]interface{}{},
+	}
+	return b
+}
+
+// GeoDistance 添加地理距离查询（查找指定经纬度范围内的文档）
+// 参数:
+//
+//	field: 地理字段名
+//	lat: 纬度
+//	lon: 经度
+//	distance: 距离（如"10km", "5mi"）
+//
+// 返回:
+//
+//	*Builder: 构建器实例
+func (b *Builder) GeoDistance(field string, lat, lon float64, distance string) *Builder {
+	b.request.Query = map[string]interface{}{
+		"geo_distance": map[string]interface{}{
+			"distance": distance,
+			field: []interface{}{lon, lat},
+		},
+	}
+	return b
+}
+
+// GeoBoundingBox 添加地理边界框查询（查找指定矩形框内的文档）
+// 参数:
+//
+//	field: 地理字段名
+//	topLat: 左上角纬度
+//	leftLon: 左上角经度
+//	bottomLat: 右下角纬度
+//	rightLon: 右下角经度
+//
+// 返回:
+//
+//	*Builder: 构建器实例
+func (b *Builder) GeoBoundingBox(field string, topLat, leftLon, bottomLat, rightLon float64) *Builder {
+	b.request.Query = map[string]interface{}{
+		"geo_bounding_box": map[string]interface{}{
+			field: map[string]interface{}{
+				"top_left": []interface{}{leftLon, topLat},
+				"bottom_right": []interface{}{rightLon, bottomLat},
+			},
+		},
+	}
+	return b
+}
+
+// TermsSet 添加terms_set查询（匹配至少/最多N个词）
+// 参数:
+//
+//	field: 字段名
+//	terms: 词列表
+//	minShouldMatch: 最少匹配数量
+//
+// 返回:
+//
+//	*Builder: 构建器实例
+func (b *Builder) TermsSet(field string, terms []string, minShouldMatch int) *Builder {
+	b.request.Query = map[string]interface{}{
+		"terms_set": map[string]interface{}{
+			field: map[string]interface{}{
+				"terms": terms,
+				"minimum_should_match": minShouldMatch,
+			},
+		},
+	}
+	return b
+}
+
+// Regexp 添加正则表达式查询
+// 参数:
+//
+//	field: 字段名
+//	pattern: 正则表达式模式
+//
+// 返回:
+//
+//	*Builder: 构建器实例
+func (b *Builder) Regexp(field string, pattern string) *Builder {
+	b.request.Query = map[string]interface{}{
+		"regexp": map[string]interface{}{
+			field: pattern,
 		},
 	}
 	return b
@@ -222,7 +460,7 @@ func (b *Builder) Pagination(from, size int) *Builder {
 	return b
 }
 
-// Sort 添加排序
+// Sort 添加简单排序
 // 参数:
 //
 //	field: 排序字段
@@ -232,8 +470,74 @@ func (b *Builder) Pagination(from, size int) *Builder {
 //
 //	*Builder: 构建器实例
 func (b *Builder) Sort(field, order string) *Builder {
-	b.request.Sort = append(b.request.Sort, map[string]string{
+	b.request.Sort = append(b.request.Sort, map[string]interface{}{
 		field: order,
+	})
+	return b
+}
+
+// SortWithMode 添加高级排序，支持自定义排序模式
+// 参数:
+//
+//	field: 排序字段
+//	order: 排序方向（asc/desc）
+//	mode: 排序模式（min/max/avg/sum/median）
+//
+// 返回:
+//
+//	*Builder: 构建器实例
+func (b *Builder) SortWithMode(field, order, mode string) *Builder {
+	sortSpec := map[string]interface{}{
+		"order": order,
+		"mode":  mode,
+	}
+	b.request.Sort = append(b.request.Sort, map[string]interface{}{
+		field: sortSpec,
+	})
+	return b
+}
+
+// SortGeoDistance 添加按地理距离排序
+// 参数:
+//
+//	field: 地理字段名
+//	lat: 纬度
+//	lon: 经度
+//	order: 排序方向（asc/desc）
+//
+// 返回:
+//
+//	*Builder: 构建器实例
+func (b *Builder) SortGeoDistance(field string, lat, lon float64, order string) *Builder {
+	geoSort := map[string]interface{}{
+		field: []interface{}{lon, lat},
+		"order": order,
+		"unit":  "km",
+	}
+	b.request.Sort = append(b.request.Sort, map[string]interface{}{
+		"_geo_distance": geoSort,
+	})
+	return b
+}
+
+// SortScript 添加脚本排序
+// 参数:
+//
+//	source: 脚本源码
+//	order: 排序方向（asc/desc）
+//
+// 返回:
+//
+//	*Builder: 构建器实例
+func (b *Builder) SortScript(source string, order string) *Builder {
+	scriptSort := map[string]interface{}{
+		"script": map[string]interface{}{
+			"source": source,
+		},
+		"order": order,
+	}
+	b.request.Sort = append(b.request.Sort, map[string]interface{}{
+		"_script": scriptSort,
 	})
 	return b
 }
@@ -564,4 +868,317 @@ func RangeQuery(field string, gte, lte interface{}) map[string]interface{} {
 			field: rangeQuery,
 		},
 	}
+}
+
+// MatchPhraseQuery 创建match_phrase查询结构
+func MatchPhraseQuery(field, query string) map[string]interface{} {
+	return map[string]interface{}{
+		"match_phrase": map[string]interface{}{
+			field: query,
+		},
+	}
+}
+
+// MatchPhrasePrefixQuery 创建match_phrase_prefix查询结构
+func MatchPhrasePrefixQuery(field, query string) map[string]interface{} {
+	return map[string]interface{}{
+		"match_phrase_prefix": map[string]interface{}{
+			field: query,
+		},
+	}
+}
+
+// MultiMatchQuery 创建multi_match查询结构
+func MultiMatchQuery(query string, fields []string) map[string]interface{} {
+	return map[string]interface{}{
+		"multi_match": map[string]interface{}{
+			"query":  query,
+			"fields": fields,
+		},
+	}
+}
+
+// ExistsQuery 创建exists查询结构
+func ExistsQuery(field string) map[string]interface{} {
+	return map[string]interface{}{
+		"exists": map[string]interface{}{
+			"field": field,
+		},
+	}
+}
+
+// PrefixQuery 创建prefix查询结构
+func PrefixQuery(field string, prefix string) map[string]interface{} {
+	return map[string]interface{}{
+		"prefix": map[string]interface{}{
+			field: prefix,
+		},
+	}
+}
+
+// WildcardQuery 创建wildcard查询结构
+func WildcardQuery(field string, pattern string) map[string]interface{} {
+	return map[string]interface{}{
+		"wildcard": map[string]interface{}{
+			field: pattern,
+		},
+	}
+}
+
+// FuzzyQuery 创建fuzzy查询结构
+func FuzzyQuery(field string, query string) map[string]interface{} {
+	return map[string]interface{}{
+		"fuzzy": map[string]interface{}{
+			field: query,
+		},
+	}
+}
+
+// FuzzyQueryWithFuzziness 创建fuzzy查询结构并指定模糊度
+func FuzzyQueryWithFuzziness(field string, query string, fuzziness interface{}) map[string]interface{} {
+	return map[string]interface{}{
+		"fuzzy": map[string]interface{}{
+			field: map[string]interface{}{
+				"value":     query,
+				"fuzziness": fuzziness,
+			},
+		},
+	}
+}
+
+// BoolQuery 创建bool查询结构
+func BoolQuery(
+	must []map[string]interface{},
+	mustNot []map[string]interface{},
+	should []map[string]interface{},
+	filter []map[string]interface{},
+) map[string]interface{} {
+	boolQuery := make(map[string]interface{})
+	if len(must) > 0 {
+		boolQuery["must"] = must
+	}
+	if len(mustNot) > 0 {
+		boolQuery["must_not"] = mustNot
+	}
+	if len(should) > 0 {
+		boolQuery["should"] = should
+	}
+	if len(filter) > 0 {
+		boolQuery["filter"] = filter
+	}
+	return map[string]interface{}{
+		"bool": boolQuery,
+	}
+}
+
+// MatchAllQuery 创建match_all查询结构
+func MatchAllQuery() map[string]interface{} {
+	return map[string]interface{}{
+		"match_all": map[string]interface{}{},
+	}
+}
+
+// GeoDistanceQuery 创建地理距离查询结构
+func GeoDistanceQuery(field string, lat, lon float64, distance string) map[string]interface{} {
+	return map[string]interface{}{
+		"geo_distance": map[string]interface{}{
+			"distance": distance,
+			field: []interface{}{lon, lat},
+		},
+	}
+}
+
+// GeoBoundingBoxQuery 创建地理边界框查询结构
+func GeoBoundingBoxQuery(field string, topLat, leftLon, bottomLat, rightLon float64) map[string]interface{} {
+	return map[string]interface{}{
+		"geo_bounding_box": map[string]interface{}{
+			field: map[string]interface{}{
+				"top_left": []interface{}{leftLon, topLat},
+				"bottom_right": []interface{}{rightLon, bottomLat},
+			},
+		},
+	}
+}
+
+// TermsSetQuery 创建terms_set查询结构
+func TermsSetQuery(field string, terms []string, minShouldMatch int) map[string]interface{} {
+	return map[string]interface{}{
+		"terms_set": map[string]interface{}{
+			field: map[string]interface{}{
+				"terms": terms,
+				"minimum_should_match": minShouldMatch,
+			},
+		},
+	}
+}
+
+// RegexpQuery 创建正则表达式查询结构
+func RegexpQuery(field string, pattern string) map[string]interface{} {
+	return map[string]interface{}{
+		"regexp": map[string]interface{}{
+			field: pattern,
+		},
+	}
+}
+
+// ScrollIterator 滚动搜索迭代器
+// 用于遍历大批量搜索结果，避免一次性加载所有结果到内存
+type ScrollIterator struct {
+	searcher      *Searcher
+	index         string
+	keepAlive     time.Duration
+	builder       *Builder
+	scrollID      string
+	hasNext       bool
+	currentResult *SearchResponse
+	err           error
+	ctx           context.Context
+}
+
+// NewScrollIterator 创建一个滚动搜索迭代器
+func (s *Searcher) NewScrollIterator(ctx context.Context, index string, keepAlive string, builder *Builder) (*ScrollIterator, error) {
+	d, err := time.ParseDuration(keepAlive)
+	if err != nil {
+		d = 5 * time.Minute // 默认5分钟
+	}
+
+	// 第一次搜索
+	// builder已经构建好查询，我们只需要确保scroll配置正确
+	// 第一次请求获取scrollID
+	reqBytes, err := builder.Build()
+	if err != nil {
+		return nil, err
+	}
+
+	res, err := s.es.Search(
+		s.es.Search.WithContext(ctx),
+		s.es.Search.WithIndex(index),
+		s.es.Search.WithBody(bytes.NewReader(reqBytes)),
+		s.es.Search.WithScroll(d),
+	)
+	if err != nil {
+		s.log.Error("Failed to init scroll iterator",
+			zap.String("index", index),
+			zap.Error(err))
+		return nil, err
+	}
+	defer res.Body.Close()
+
+	if res.IsError() {
+		body, _ := io.ReadAll(res.Body)
+		return nil, errors.New(errors.ErrCodeSearch, string(body))
+	}
+
+	// 读取整个响应来获取scrollID
+	bodyBytes, err := io.ReadAll(res.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var full struct {
+		ScrollID string `json:"_scroll_id"`
+		SearchResponse
+	}
+	if err := json.Unmarshal(bodyBytes, &full); err != nil {
+		return nil, err
+	}
+
+	return &ScrollIterator{
+		searcher:      s,
+		index:         index,
+		keepAlive:     d,
+		builder:       builder,
+		scrollID:      full.ScrollID,
+		hasNext:       len(full.Hits.Hits) > 0,
+		currentResult:  &full.SearchResponse,
+		ctx:           ctx,
+	}, nil
+}
+
+// Next 是否还有下一批结果
+func (it *ScrollIterator) Next() bool {
+	if !it.hasNext || it.err != nil {
+		return false
+	}
+
+	// 如果已经有currentResult，说明调用者还没获取当前批
+	// 我们需要获取下一批
+	if it.currentResult != nil && len(it.currentResult.Hits.Hits) == 0 {
+		it.hasNext = false
+		return false
+	}
+
+	// 使用scroll ID获取下一批
+	res, err := it.searcher.es.Scroll(
+		it.searcher.es.Scroll.WithContext(it.ctx),
+		it.searcher.es.Scroll.WithScrollID(it.scrollID),
+		it.searcher.es.Scroll.WithScroll(it.keepAlive),
+	)
+	if err != nil {
+		it.err = err
+		it.hasNext = false
+		return false
+	}
+	defer res.Body.Close()
+
+	if res.IsError() {
+		body, _ := io.ReadAll(res.Body)
+		it.err = errors.New(errors.ErrCodeSearch, string(body))
+		it.hasNext = false
+		return false
+	}
+
+	var fullResponse struct {
+		ScrollID string `json:"_scroll_id"`
+		SearchResponse
+	}
+	if err := json.NewDecoder(res.Body).Decode(&fullResponse); err != nil {
+		it.err = err
+		it.hasNext = false
+		return false
+	}
+
+	it.scrollID = fullResponse.ScrollID
+	it.currentResult = &fullResponse.SearchResponse
+	it.hasNext = len(fullResponse.Hits.Hits) > 0
+
+	return true
+}
+
+// Result 获取当前批结果
+func (it *ScrollIterator) Result() *SearchResponse {
+	return it.currentResult
+}
+
+// Err 获取迭代过程中的错误
+func (it *ScrollIterator) Err() error {
+	return it.err
+}
+
+// Close 关闭滚动搜索，清理scroll
+func (it *ScrollIterator) Close() error {
+	if it.scrollID == "" {
+		return nil
+	}
+
+	// 清除scroll
+	res, err := it.searcher.es.ClearScroll(
+		it.searcher.es.ClearScroll.WithScrollID(it.scrollID),
+		it.searcher.es.ClearScroll.WithContext(it.ctx),
+	)
+	if err != nil {
+		it.searcher.log.Warn("Failed to clear scroll", zap.Error(err))
+		return err
+	}
+	defer res.Body.Close()
+
+	if res.IsError() {
+		body, _ := io.ReadAll(res.Body)
+		it.searcher.log.Warn("Clear scroll returned error", zap.String("response", string(body)))
+		return errors.New(errors.ErrCodeSearch, string(body))
+	}
+
+	it.hasNext = false
+	it.scrollID = ""
+	return nil
 }

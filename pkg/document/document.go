@@ -475,3 +475,242 @@ func (m *Manager) Exists(ctx context.Context, index, docID string) (bool, error)
 
 	return res.StatusCode == 200, nil
 }
+
+// UpdateByQueryResponse 更新按查询响应
+type UpdateByQueryResponse struct {
+	Total      int64 `json:"total"`
+	Updated    int64 `json:"updated"`
+	Deleted    int64 `json:"deleted"`
+	Batches    int   `json:"batches"`
+	VersionConflicts int64 `json:"version_conflicts"`
+	Failures   []map[string]interface{} `json:"failures"`
+}
+
+// UpdateByQuery 根据查询条件批量更新文档
+// 使用inline脚本更新匹配文档
+// 参数:
+//
+//	ctx: 上下文
+//	index: 索引名称
+//	query: 查询条件（匹配要更新的文档）
+//	script: 更新脚本（Painless语法）
+//
+// 返回:
+//
+//	*UpdateByQueryResponse: 更新结果统计
+//	error: 操作错误
+func (m *Manager) UpdateByQuery(
+	ctx context.Context,
+	index string,
+	query map[string]interface{},
+	script string,
+) (*UpdateByQueryResponse, error) {
+	// 构建请求体
+	request := map[string]interface{}{
+		"query": query,
+		"script": map[string]interface{}{
+			"source": script,
+		},
+	}
+
+	reqBytes, err := json.Marshal(request)
+	if err != nil {
+		m.log.Error("Failed to marshal update by query request",
+			zap.String("index", index),
+			zap.Error(err))
+		return nil, errors.Wrap(errors.ErrCodeMarshalJSON,
+			"failed to marshal update by query request", err)
+	}
+
+	res, err := m.es.UpdateByQuery(
+		[]string{index},
+		m.es.UpdateByQuery.WithContext(ctx),
+		m.es.UpdateByQuery.WithBody(bytes.NewReader(reqBytes)),
+		m.es.UpdateByQuery.WithConflicts("proceed"),
+	)
+	if err != nil {
+		m.log.Error("Failed to execute update by query",
+			zap.String("index", index),
+			zap.Error(err))
+		return nil, errors.Wrap(errors.ErrCodeDocumentUpdate,
+			"failed to execute update by query", err)
+	}
+	defer res.Body.Close()
+
+	if res.IsError() {
+		body, _ := io.ReadAll(res.Body)
+		m.log.Error("Update by query returned error",
+			zap.String("index", index),
+			zap.Int("status", res.StatusCode),
+			zap.String("response", string(body)))
+		return nil, errors.New(errors.ErrCodeDocumentUpdate, string(body))
+	}
+
+	var response UpdateByQueryResponse
+	if err := json.NewDecoder(res.Body).Decode(&response); err != nil {
+		m.log.Error("Failed to decode update by query response",
+			zap.String("index", index),
+			zap.Error(err))
+		return nil, err
+	}
+
+	m.log.Debug("Update by query completed",
+		zap.String("index", index),
+		zap.Int64("total", response.Total),
+		zap.Int64("updated", response.Updated),
+		zap.Int64("conflicts", response.VersionConflicts))
+
+	return &response, nil
+}
+
+// DeleteByQueryResponse 删除按查询响应
+type DeleteByQueryResponse struct {
+	Total      int64 `json:"total"`
+	Deleted    int64 `json:"deleted"`
+	Batches    int   `json:"batches"`
+	VersionConflicts int64 `json:"version_conflicts"`
+	Failures   []map[string]interface{} `json:"failures"`
+}
+
+// DeleteByQuery 根据查询条件批量删除文档
+// 参数:
+//
+//	ctx: 上下文
+//	index: 索引名称
+//	query: 查询条件（匹配要删除的文档）
+//
+// 返回:
+//
+//	*DeleteByQueryResponse: 删除结果统计
+//	error: 操作错误
+func (m *Manager) DeleteByQuery(
+	ctx context.Context,
+	index string,
+	query map[string]interface{},
+) (*DeleteByQueryResponse, error) {
+	// 构建请求体
+	request := map[string]interface{}{
+		"query": query,
+	}
+
+	reqBytes, err := json.Marshal(request)
+	if err != nil {
+		m.log.Error("Failed to marshal delete by query request",
+			zap.String("index", index),
+			zap.Error(err))
+		return nil, errors.Wrap(errors.ErrCodeMarshalJSON,
+			"failed to marshal delete by query request", err)
+	}
+
+	res, err := m.es.DeleteByQuery(
+		[]string{index},
+		bytes.NewReader(reqBytes),
+		m.es.DeleteByQuery.WithContext(ctx),
+		m.es.DeleteByQuery.WithConflicts("proceed"),
+	)
+	if err != nil {
+		m.log.Error("Failed to execute delete by query",
+			zap.String("index", index),
+			zap.Error(err))
+		return nil, errors.Wrap(errors.ErrCodeDocumentDelete,
+			"failed to execute delete by query", err)
+	}
+	defer res.Body.Close()
+
+	if res.IsError() {
+		body, _ := io.ReadAll(res.Body)
+		m.log.Error("Delete by query returned error",
+			zap.String("index", index),
+			zap.Int("status", res.StatusCode),
+			zap.String("response", string(body)))
+		return nil, errors.New(errors.ErrCodeDocumentDelete, string(body))
+	}
+
+	var response DeleteByQueryResponse
+	if err := json.NewDecoder(res.Body).Decode(&response); err != nil {
+		m.log.Error("Failed to decode delete by query response",
+			zap.String("index", index),
+			zap.Error(err))
+		return nil, err
+	}
+
+	m.log.Debug("Delete by query completed",
+		zap.String("index", index),
+		zap.Int64("total", response.Total),
+		zap.Int64("deleted", response.Deleted))
+
+	return &response, nil
+}
+
+// UpdateByQueryWithParams 根据查询条件批量更新文档（带参数）
+// 参数:
+//
+//	ctx: 上下文
+//	index: 索引名称
+//	query: 查询条件
+//	scriptSource: 脚本源码
+//	params: 脚本参数
+//
+// 返回:
+//
+//	*UpdateByQueryResponse: 更新结果统计
+//	error: 操作错误
+func (m *Manager) UpdateByQueryWithParams(
+	ctx context.Context,
+	index string,
+	query map[string]interface{},
+	scriptSource string,
+	params map[string]interface{},
+) (*UpdateByQueryResponse, error) {
+	// 构建请求体
+	request := map[string]interface{}{
+		"query": query,
+		"script": map[string]interface{}{
+			"source": scriptSource,
+			"params": params,
+		},
+	}
+
+	reqBytes, err := json.Marshal(request)
+	if err != nil {
+		m.log.Error("Failed to marshal update by query request",
+			zap.String("index", index),
+			zap.Error(err))
+		return nil, errors.Wrap(errors.ErrCodeMarshalJSON,
+			"failed to marshal update by query request", err)
+	}
+
+	res, err := m.es.UpdateByQuery(
+		[]string{index},
+		m.es.UpdateByQuery.WithContext(ctx),
+		m.es.UpdateByQuery.WithBody(bytes.NewReader(reqBytes)),
+		m.es.UpdateByQuery.WithConflicts("proceed"),
+	)
+	if err != nil {
+		m.log.Error("Failed to execute update by query",
+			zap.String("index", index),
+			zap.Error(err))
+		return nil, errors.Wrap(errors.ErrCodeDocumentUpdate,
+			"failed to execute update by query", err)
+	}
+	defer res.Body.Close()
+
+	if res.IsError() {
+		body, _ := io.ReadAll(res.Body)
+		m.log.Error("Update by query returned error",
+			zap.String("index", index),
+			zap.Int("status", res.StatusCode),
+			zap.String("response", string(body)))
+		return nil, errors.New(errors.ErrCodeDocumentUpdate, string(body))
+	}
+
+	var response UpdateByQueryResponse
+	if err := json.NewDecoder(res.Body).Decode(&response); err != nil {
+		m.log.Error("Failed to decode update by query response",
+			zap.String("index", index),
+			zap.Error(err))
+		return nil, err
+	}
+
+	return &response, nil
+}
