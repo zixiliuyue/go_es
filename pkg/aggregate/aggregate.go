@@ -68,7 +68,9 @@ func (a *TermsAggregation) Build() (map[string]interface{}, error) {
 	}
 
 	return map[string]interface{}{
-		"terms": terms,
+		a.name: map[string]interface{}{
+			"terms": terms,
+		},
 	}, nil
 }
 
@@ -121,7 +123,9 @@ func (a *HistogramAggregation) Build() (map[string]interface{}, error) {
 	}
 
 	return map[string]interface{}{
-		"histogram": histogram,
+		a.name: map[string]interface{}{
+			"histogram": histogram,
+		},
 	}, nil
 }
 
@@ -180,7 +184,9 @@ func (a *DateHistogramAggregation) Build() (map[string]interface{}, error) {
 	}
 
 	return map[string]interface{}{
-		"date_histogram": dateHistogram,
+		a.name: map[string]interface{}{
+			"date_histogram": dateHistogram,
+		},
 	}, nil
 }
 
@@ -225,11 +231,14 @@ func (a *RangeAggregation) Name() string {
 }
 
 // Build 构建聚合
+// 返回 {"<name>": {"range": {"field":..., "ranges":...}}}
 func (a *RangeAggregation) Build() (map[string]interface{}, error) {
 	return map[string]interface{}{
-		"range": map[string]interface{}{
-			"field":  a.field,
-			"ranges": a.ranges,
+		a.name: map[string]interface{}{
+			"range": map[string]interface{}{
+				"field":  a.field,
+				"ranges": a.ranges,
+			},
 		},
 	}, nil
 }
@@ -264,8 +273,10 @@ func (a *AvgAggregation) Name() string {
 // Build 构建聚合
 func (a *AvgAggregation) Build() (map[string]interface{}, error) {
 	return map[string]interface{}{
-		"avg": map[string]interface{}{
-			"field": a.field,
+		a.name: map[string]interface{}{
+			"avg": map[string]interface{}{
+				"field": a.field,
+			},
 		},
 	}, nil
 }
@@ -300,8 +311,10 @@ func (a *SumAggregation) Name() string {
 // Build 构建聚合
 func (a *SumAggregation) Build() (map[string]interface{}, error) {
 	return map[string]interface{}{
-		"sum": map[string]interface{}{
-			"field": a.field,
+		a.name: map[string]interface{}{
+			"sum": map[string]interface{}{
+				"field": a.field,
+			},
 		},
 	}, nil
 }
@@ -336,8 +349,10 @@ func (a *MinAggregation) Name() string {
 // Build 构建聚合
 func (a *MinAggregation) Build() (map[string]interface{}, error) {
 	return map[string]interface{}{
-		"min": map[string]interface{}{
-			"field": a.field,
+		a.name: map[string]interface{}{
+			"min": map[string]interface{}{
+				"field": a.field,
+			},
 		},
 	}, nil
 }
@@ -372,8 +387,10 @@ func (a *MaxAggregation) Name() string {
 // Build 构建聚合
 func (a *MaxAggregation) Build() (map[string]interface{}, error) {
 	return map[string]interface{}{
-		"max": map[string]interface{}{
-			"field": a.field,
+		a.name: map[string]interface{}{
+			"max": map[string]interface{}{
+				"field": a.field,
+			},
 		},
 	}, nil
 }
@@ -408,8 +425,10 @@ func (a *StatsAggregation) Name() string {
 // Build 构建聚合
 func (a *StatsAggregation) Build() (map[string]interface{}, error) {
 	return map[string]interface{}{
-		"stats": map[string]interface{}{
-			"field": a.field,
+		a.name: map[string]interface{}{
+			"stats": map[string]interface{}{
+				"field": a.field,
+			},
 		},
 	}, nil
 }
@@ -444,8 +463,10 @@ func (a *CardinalityAggregation) Name() string {
 // Build 构建聚合
 func (a *CardinalityAggregation) Build() (map[string]interface{}, error) {
 	return map[string]interface{}{
-		"cardinality": map[string]interface{}{
-			"field": a.field,
+		a.name: map[string]interface{}{
+			"cardinality": map[string]interface{}{
+				"field": a.field,
+			},
 		},
 	}, nil
 }
@@ -473,13 +494,20 @@ func NewNestedAggregation(parent Aggregation, sub []Aggregation) *NestedAggregat
 }
 
 // Build 构建嵌套聚合
+// 返回 {"<父聚合名>": {"terms": {...}, "aggs": {"子名": {"avg": {...}}}}}
+// 子聚合 Build() 返回 {"<子名>": {<type>: {...}}}, 这里取内层
 func (n *NestedAggregation) Build() (map[string]interface{}, error) {
 	parentMap, err := n.parent.Build()
 	if err != nil {
 		return nil, err
 	}
+	// parentMap 形如 {"<parentName>": {"<type>": {...}}}
+	// 取父聚合内层定义 {"<type>": {...}}
+	var parentInner map[string]interface{}
+	for _, v := range parentMap {
+		parentInner, _ = v.(map[string]interface{})
+	}
 
-	// 添加子聚合
 	if len(n.sub) > 0 {
 		aggs := make(map[string]interface{})
 		for _, subAgg := range n.sub {
@@ -487,22 +515,19 @@ func (n *NestedAggregation) Build() (map[string]interface{}, error) {
 			if err != nil {
 				return nil, err
 			}
-			// subMap 的结构是 {aggType: aggDef}，需要提取出来
-			for _, aggDef := range subMap {
-				// 找到聚合定义，然后包装到 aggs 中
-				_ = parentMap[n.parent.Name()]
-				aggs[subAgg.Name()] = aggDef
+			// subMap 形如 {"<subName>": {"<type>": {...}}}, 取内层
+			var subInner map[string]interface{}
+			for _, v := range subMap {
+				subInner, _ = v.(map[string]interface{})
 			}
+			aggs[subAgg.Name()] = subInner
 		}
-		// 将子聚合添加到父聚合中
-		for k, v := range parentMap {
-			aggDef := v.(map[string]interface{})
-			aggDef["aggs"] = aggs
-			parentMap[k] = aggDef
-		}
+		parentInner["aggs"] = aggs
 	}
 
-	return parentMap, nil
+	return map[string]interface{}{
+		n.parent.Name(): parentInner,
+	}, nil
 }
 
 // Name 获取聚合名称（使用父聚合名称）

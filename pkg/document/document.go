@@ -398,9 +398,10 @@ func (m *Manager) Bulk(ctx context.Context, ops []BulkOperation) (int, int, erro
 		}
 
 		item := esutil.BulkIndexerItem{
-			Index:      op.Index,
-			DocumentID: op.ID,
-			Body:       bytes.NewReader(docBytes),
+			Action:      op.Operation, // "index" | "create" | "update" | "delete"
+			Index:       op.Index,
+			DocumentID:  op.ID,
+			Body:        bytes.NewReader(docBytes),
 			OnSuccess: func(_ context.Context, _ esutil.BulkIndexerItem, _ esutil.BulkIndexerResponseItem) {
 				successful++
 			},

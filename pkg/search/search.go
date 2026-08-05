@@ -69,7 +69,22 @@ func NewSearch() *Builder {
 }
 
 // Build 构建搜索请求JSON
+// ES 8 严格模式不允许 "query": null,因此 query 为空时省略该字段
 func (b *Builder) Build() ([]byte, error) {
+	if b.request.Query == nil {
+		// 直接序列化去掉 query 字段
+		return json.Marshal(struct {
+			From         int                      `json:"from,omitempty"`
+			Size         int                      `json:"size,omitempty"`
+			Sort         []map[string]interface{} `json:"sort,omitempty"`
+			Aggregations map[string]interface{}   `json:"aggs,omitempty"`
+		}{
+			From:         b.request.From,
+			Size:         b.request.Size,
+			Sort:         b.request.Sort,
+			Aggregations: b.request.Aggregations,
+		})
+	}
 	return json.Marshal(b.request)
 }
 
@@ -645,10 +660,16 @@ func NewSearcher(es *elasticsearch.Client, log *zap.Logger) *Searcher {
 func (s *Searcher) Search(ctx context.Context, index string, builder *Builder) (*SearchResponse, error) {
 	reqBytes, err := builder.Build()
 	if err != nil {
-		s.log.Error("Failed to build search request", zap.Error(err))
+		s.log.Error("Failed to build search request",
+			zap.String("index", index),
+			zap.String("body", string(reqBytes)),
+			zap.Error(err))
 		return nil, errors.Wrap(errors.ErrCodeMarshalJSON,
 			"failed to build search request", err)
 	}
+	s.log.Debug("search request body",
+		zap.String("index", index),
+		zap.String("body", string(reqBytes)))
 
 	res, err := s.es.Search(
 		s.es.Search.WithContext(ctx),

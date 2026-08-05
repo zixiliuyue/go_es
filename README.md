@@ -26,9 +26,38 @@ go_es/
     ├── search/         # 查询构建功能
     │   ├── search.go
     │   └── search_test.go
-    └── aggregate/     # 聚合分析功能
-        ├── aggregate.go
-        └── aggregate_test.go
+    ├── aggregate/      # 聚合分析功能
+    │   ├── aggregate.go
+    │   └── aggregate_test.go
+    ├── bulkio/         # 批量导入导出
+    │   ├── bulkio.go
+    │   └── bulkio_test.go
+    ├── suggest/        # 搜索建议
+    │   └── suggest.go
+    ├── pool/           # 客户端连接池
+    │   ├── pool.go
+    │   └── pool_test.go
+    ├── metrics/        # Prometheus监控
+    │   ├── metrics.go
+    │   └── README.md
+    ├── alias/          # 索引别名管理(零停机切换)
+    │   ├── alias.go
+    │   └── alias_test.go
+    ├── ilm/            # 索引生命周期管理
+    │   ├── ilm.go
+    │   └── ilm_test.go
+    ├── template/       # 索引模板管理
+    │   ├── template.go
+    │   └── template_test.go
+    ├── reindex/        # 数据迁移与任务轮询
+    │   ├── reindex.go
+    │   └── reindex_test.go
+    ├── ingest/         # Ingest Pipeline 预处理
+    │   ├── ingest.go
+    │   └── ingest_test.go
+    └── cluster/        # 集群健康 + 快照恢复
+        ├── cluster.go
+        └── cluster_test.go
 ```
 
 ## 功能特性
@@ -82,6 +111,39 @@ go_es/
   - Cardinality聚合（去重计数）
 - 支持嵌套聚合（在桶聚合中嵌套指标聚合）
 - 便捷的结果解析
+
+### 6. 索引别名管理（pkg/alias）
+- 单个别名 Add/Remove
+- 原子批量动作 `UpdateAliases`（一次请求 add + remove）
+- 零停机切换 `SwitchAlias(oldIndex, newIndex)`
+- 别名绑定索引查询 `GetAlias`
+- 基于过滤器的别名（带 `WithFilter`）+ 写索引（`WithWriteIndex`）
+
+### 7. 索引生命周期管理（pkg/ilm）
+- ILM Policy 的 CRUD（hot/warm/cold/delete 四阶段）
+- `BuildTimedRolloverPolicy` 便捷构造日志类策略
+- `ExplainIndex` 查询索引当前所处阶段
+
+### 8. 索引模板（pkg/template）
+- Composable Index Template CRUD
+- Component Template CRUD
+- 模板模拟渲染 `Simulate(indexName)`：无需建索引即可预览最终配置
+
+### 9. 数据迁移（pkg/reindex）
+- 本地/远端源 + 查询过滤 + Painless 脚本 + 切片并行
+- 同步模式 `WaitForCompletion=true` 直接返回统计
+- 异步模式返回 taskID，配合 `GetTask` / `CancelTask` / `WaitForTask`
+
+### 10. Ingest Pipeline（pkg/ingest）
+- Pipeline 的 CRUD（`PutPipeline` / `GetPipeline` / `DeletePipeline`）
+- `Simulate` 在不写入的情况下预览处理结果
+- `IndexWithPipeline` 一行调用：`POST index/_doc?pipeline=xxx`
+
+### 11. 集群健康与快照（pkg/cluster）
+- `Health(level)` / `WaitForHealth(level, status, timeout)`
+- `ListNodes` 节点概览
+- 快照仓库（fs/s3）CRUD：`PutRepository` / `DeleteRepository`
+- 快照生命周期：`CreateSnapshot` / `RestoreSnapshot` / `GetSnapshot`
 
 ## 环境要求
 
