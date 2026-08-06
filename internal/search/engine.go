@@ -26,7 +26,9 @@ type Engine struct {
 	docs map[string]map[string]map[string]interface{}
 	// inverted: index -> field -> token -> set(docID)
 	inverted map[string]map[string]map[string]map[string]struct{}
-	store    *storage.Store
+	// sortedCache: 范围查询加速(数值/字符串字段排序倒排)
+	sortedCache *sortedIndexCache
+	store       *storage.Store
 }
 
 // New 创建一个新的 Engine
@@ -34,9 +36,10 @@ type Engine struct {
 func New(store *storage.Store) *Engine {
 	inverted := make(map[string]map[string]map[string]map[string]struct{})
 	return &Engine{
-		docs:     make(map[string]map[string]map[string]interface{}),
-		inverted: inverted,
-		store:    store,
+		docs:        make(map[string]map[string]map[string]interface{}),
+		inverted:    inverted,
+		sortedCache: newSortedIndexCache(),
+		store:       store,
 	}
 }
 
@@ -60,6 +63,10 @@ func (e *Engine) IndexDoc(index, id string, doc map[string]interface{}) {
 	}
 	for field, raw := range doc {
 		e.indexField(index, id, field, raw)
+		// 维护范围查询排序索引
+		if v, ok := valueOf(raw); ok {
+			e.sortedCache.upsert(index, field, v, id)
+		}
 	}
 }
 
@@ -99,6 +106,8 @@ func (e *Engine) DeleteDoc(index, id string) {
 				e.unindexField(index, id, field, raw)
 			}
 			delete(docs, id)
+			// 同步 sortedCache
+			e.sortedCache.removeDoc(index, id)
 		}
 	}
 }

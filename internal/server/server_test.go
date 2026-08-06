@@ -24,6 +24,7 @@ func newTestServer(t *testing.T) *httptest.Server {
 	assert.NoError(t, err)
 	engine := search.New(store)
 	srv := New(store, engine, zap.NewNop())
+	srv.MarkStartupDone()
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(func() {
 		ts.Close()
@@ -34,6 +35,11 @@ func newTestServer(t *testing.T) *httptest.Server {
 
 // do 是测试 HTTP 调用的辅助
 func do(t *testing.T, ts *httptest.Server, method, path string, body interface{}) (*http.Response, []byte) {
+	return doWithHeaders(t, ts, method, path, body, nil)
+}
+
+// doWithHeaders 与 do 类似, 但允许注入额外的请求头
+func doWithHeaders(t *testing.T, ts *httptest.Server, method, path string, body interface{}, headers map[string]string) (*http.Response, []byte) {
 	t.Helper()
 	var rd io.Reader
 	if body != nil {
@@ -43,6 +49,9 @@ func do(t *testing.T, ts *httptest.Server, method, path string, body interface{}
 	req, _ := http.NewRequest(method, ts.URL+path, rd)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	assert.NoError(t, err)

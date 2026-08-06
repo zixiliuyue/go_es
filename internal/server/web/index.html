@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>go_es · 控制台</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>
+    * { box-sizing: border-box; }
+    body { font: 14px/1.5 -apple-system, system-ui, sans-serif; margin: 0; background: #0f1115; color: #e6e6e6; }
+    header { padding: 12px 20px; background: #1a1d24; border-bottom: 1px solid #2a2e36; display: flex; align-items: center; gap: 16px; }
+    header h1 { margin: 0; font-size: 16px; color: #79c0ff; }
+    header .badge { font-size: 11px; padding: 2px 6px; background: #2a2e36; border-radius: 3px; color: #8b949e; }
+    header a { color: #79c0ff; text-decoration: none; }
+    main { display: grid; grid-template-columns: 240px 1fr; height: calc(100vh - 50px); }
+    aside { background: #16181d; border-right: 1px solid #2a2e36; overflow-y: auto; }
+    aside h2 { font-size: 11px; text-transform: uppercase; color: #6e7681; padding: 12px 16px 4px; margin: 0; }
+    .idx { display: block; padding: 6px 16px; cursor: pointer; color: #c9d1d9; text-decoration: none; }
+    .idx:hover { background: #1f242c; }
+    .idx.active { background: #1f6feb; color: white; }
+    .content { padding: 20px; overflow-y: auto; }
+    .panel { background: #16181d; border: 1px solid #2a2e36; border-radius: 6px; margin-bottom: 16px; }
+    .panel h3 { margin: 0; padding: 10px 14px; font-size: 12px; text-transform: uppercase; color: #8b949e; border-bottom: 1px solid #2a2e36; }
+    .panel pre { margin: 0; padding: 12px 14px; max-height: 320px; overflow: auto; font-size: 12px; color: #c9d1d9; white-space: pre-wrap; word-break: break-all; }
+    .row { display: flex; gap: 8px; padding: 12px 14px; align-items: center; flex-wrap: wrap; }
+    .row input, .row select { background: #0d1117; color: #e6e6e6; border: 1px solid #2a2e36; padding: 6px 8px; border-radius: 4px; font-size: 13px; }
+    .row input { flex: 1; min-width: 120px; }
+    .row button { background: #1f6feb; color: white; border: 0; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 13px; }
+    .row button:hover { background: #388bfd; }
+    .row button.secondary { background: #30363d; }
+    .row button.secondary:hover { background: #484f58; }
+    .stat { display: flex; gap: 24px; padding: 12px 14px; }
+    .stat div { text-align: center; }
+    .stat b { display: block; font-size: 22px; color: #79c0ff; }
+    .stat span { font-size: 11px; color: #6e7681; }
+    .empty { color: #6e7681; padding: 16px; font-style: italic; }
+    .err { color: #f85149; }
+    .ok { color: #3fb950; }
+    /* 表格样式 (聚合结果) */
+    table.agg { border-collapse: collapse; width: 100%; font-size: 12px; }
+    table.agg th, table.agg td { padding: 6px 14px; text-align: left; border-bottom: 1px solid #2a2e36; }
+    table.agg th { color: #8b949e; font-weight: 500; }
+    table.agg tr:hover { background: #1f242c; }
+    .bar { display: inline-block; background: #1f6feb; height: 12px; border-radius: 2px; vertical-align: middle; }
+    /* 分页 */
+    .pager { padding: 8px 14px; display: flex; align-items: center; gap: 12px; border-top: 1px solid #2a2e36; }
+    .pager button { background: #30363d; color: white; border: 0; padding: 4px 10px; border-radius: 3px; cursor: pointer; }
+    .pager button:disabled { opacity: 0.4; cursor: not-allowed; }
+    .pager button:hover:not(:disabled) { background: #484f58; }
+    .pager span { font-size: 12px; color: #8b949e; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>go_es · 控制台</h1>
+  <span class="badge" id="ver">v?</span>
+  <span class="badge" id="health">health?</span>
+  <span style="flex:1"></span>
+  <span class="badge"><a href="/metrics">/metrics</a></span>
+  <span class="badge"><a href="/_cluster/health">/_cluster/health</a></span>
+</header>
+<main>
+  <aside>
+    <h2>索引</h2>
+    <div id="indices"><div class="empty">加载中...</div></div>
+    <h2 style="margin-top:8px">_tasks</h2>
+    <div id="tasks" style="padding: 0 16px 8px; font-size: 12px;"></div>
+  </aside>
+  <section class="content">
+    <div class="panel">
+      <h3>查询</h3>
+      <div class="row">
+        <input id="qField" placeholder="字段, 如 title" value="title">
+        <input id="qValue" placeholder="值, 如 hello" value="">
+        <select id="qType">
+          <option value="match">match</option>
+          <option value="term">term</option>
+          <option value="range">range</option>
+          <option value="match_all">match_all</option>
+        </select>
+        <input id="qFrom" type="number" value="0" min="0" step="10" style="flex:0 0 80px" title="from">
+        <input id="qSize" type="number" value="20" min="1" max="200" style="flex:0 0 80px" title="size">
+        <button onclick="runSearch()">搜索</button>
+        <button class="secondary" onclick="prevPage()">←</button>
+        <button class="secondary" onclick="nextPage()">→</button>
+      </div>
+      <pre id="searchResult">在左侧选索引后输入字段和值, 点搜索.</pre>
+      <div class="pager">
+        <span id="pageInfo">第 - / - 页</span>
+        <span id="totalInfo">total: -</span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>聚合 (按字段计数 TopN)</h3>
+      <div class="row">
+        <input id="aggField" placeholder="字段, 如 category" value="category">
+        <input id="aggSize" type="number" value="10" min="1" max="50" style="flex:0 0 80px" title="size">
+        <input id="aggQuery" placeholder="(可选) 范围筛选表达式" value="">
+        <button onclick="runAgg()">聚合</button>
+      </div>
+      <div id="aggResult" style="padding: 0 14px 12px;">在左侧选索引后输入字段, 点聚合.</div>
+    </div>
+
+    <div class="panel">
+      <h3>集群状态</h3>
+      <div class="stat" id="cluster"><div><b>-</b><span>loading</span></div></div>
+    </div>
+
+    <div class="panel" id="mappingPanel" style="display:none">
+      <h3>Mapping — <span id="curIdx"></span></h3>
+      <pre id="mappingResult"></pre>
+    </div>
+  </section>
+</main>
+<script>
+  const $ = (id) => document.getElementById(id);
+  let currentIndex = null;
+  let currentPage = 0;
+  const pageSize = 20;
+
+  async function jget(path) {
+    const r = await fetch(path, { headers: { 'Accept': 'application/json' } });
+    const t = await r.text();
+    try { return { ok: r.ok, code: r.status, json: JSON.parse(t), raw: t }; }
+    catch { return { ok: r.ok, code: r.status, json: null, raw: t }; }
+  }
+  async function jpost(path, body) {
+    const r = await fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    return { ok: r.ok, code: r.status, text: await r.text() };
+  }
+
+  async function loadHeader() {
+    const r = await jget('/');
+    if (r.ok && r.json) $('ver').textContent = r.json.version?.number || 'v?';
+    const h = await jget('/_health/readiness');
+    $('health').textContent = h.ok ? 'ready' : 'down';
+    $('health').style.color = h.ok ? '#3fb950' : '#f85149';
+  }
+
+  async function loadIndices() {
+    const r = await jget('/_cat/indices');
+    const list = $('indices');
+    if (!r.ok || !Array.isArray(r.json) || r.json.length === 0) {
+      list.innerHTML = '<div class="empty">无索引</div>';
+      return;
+    }
+    list.innerHTML = '';
+    r.json.forEach(idx => {
+      const a = document.createElement('a');
+      a.className = 'idx';
+      a.textContent = idx.index + ' (' + (idx['docs.count'] || 0) + ')';
+      a.onclick = (e) => { e.preventDefault(); selectIndex(idx.index); };
+      list.appendChild(a);
+    });
+  }
+
+  async function selectIndex(name) {
+    currentIndex = name;
+    currentPage = 0;
+    document.querySelectorAll('.idx').forEach(el => el.classList.toggle('active', el.textContent.startsWith(name)));
+    $('curIdx').textContent = name;
+    $('mappingPanel').style.display = 'block';
+    const r = await jget('/' + encodeURIComponent(name) + '/_mapping');
+    $('mappingResult').textContent = r.ok ? JSON.stringify(r.json, null, 2) : ('ERR ' + r.code + ' ' + r.raw);
+  }
+
+  function buildQuery() {
+    const f = $('qField').value.trim();
+    const v = $('qValue').value.trim();
+    const t = $('qType').value;
+    if (t === 'match_all') return { match_all: {} };
+    if (t === 'range') {
+      // v 形如 "10,20" -> gte=10 lte=20
+      const parts = v.split(',').map(s => s.trim());
+      const rng = {};
+      if (parts[0]) rng.gte = isNaN(parts[0]) ? parts[0] : Number(parts[0]);
+      if (parts[1]) rng.lte = isNaN(parts[1]) ? parts[1] : Number(parts[1]);
+      return { range: { [f]: rng } };
+    }
+    if (t === 'term') {
+      // 自动判断数字
+      const n = isNaN(v) ? v : Number(v);
+      return { term: { [f]: n } };
+    }
+    // match
+    return { match: { [f]: v } };
+  }
+
+  async function runSearch() {
+    if (!currentIndex) { alert('先选一个索引'); return; }
+    const f = $('qField').value.trim();
+    const t = $('qType').value;
+    if (t !== 'match_all' && !f) { alert('字段必填'); return; }
+    const v = $('qValue').value.trim();
+    if (t !== 'match_all' && t !== 'range' && !v) { alert('值必填'); return; }
+    const from = Number($('qFrom').value) || 0;
+    const size = Number($('qSize').value) || 20;
+    const body = { query: buildQuery(), from, size };
+    const r = await jpost('/' + encodeURIComponent(currentIndex) + '/_search', body);
+    let parsed;
+    try { parsed = JSON.parse(r.text); } catch { parsed = null; }
+    if (parsed && parsed.hits) {
+      const total = parsed.hits.total?.value ?? 0;
+      $('searchResult').textContent = JSON.stringify(parsed, null, 2);
+      $('pageInfo').textContent = '第 ' + (currentPage + 1) + ' 页 (from=' + from + ')';
+      $('totalInfo').textContent = 'total: ' + total;
+    } else {
+      $('searchResult').textContent = 'ERR ' + r.code + ' ' + r.text;
+    }
+  }
+
+  function prevPage() {
+    if (!currentIndex) return;
+    const size = Number($('qSize').value) || 20;
+    if (currentPage > 0) {
+      currentPage--;
+      $('qFrom').value = currentPage * size;
+      runSearch();
+    }
+  }
+  function nextPage() {
+    if (!currentIndex) return;
+    const size = Number($('qSize').value) || 20;
+    currentPage++;
+    $('qFrom').value = currentPage * size;
+    runSearch();
+  }
+
+  async function runAgg() {
+    if (!currentIndex) { alert('先选一个索引'); return; }
+    const f = $('aggField').value.trim();
+    if (!f) { alert('字段必填'); return; }
+    const size = Number($('aggSize').value) || 10;
+    const filterText = $('aggQuery').value.trim();
+    let query = { match_all: {} };
+    if (filterText) {
+      try { query = JSON.parse(filterText); } catch { alert('范围筛选表达式不是合法 JSON'); return; }
+    }
+    const body = { size: 0, query, aggs: { g: { terms: { field: f, size } } } };
+    const r = await jpost('/' + encodeURIComponent(currentIndex) + '/_search', body);
+    let parsed;
+    try { parsed = JSON.parse(r.text); } catch { parsed = null; }
+    if (parsed && parsed.aggregations && parsed.aggregations.g) {
+      const buckets = parsed.aggregations.g.buckets || [];
+      if (buckets.length === 0) {
+        $('aggResult').innerHTML = '<div class="empty">无聚合结果 (字段可能没数据或不可用)</div>';
+        return;
+      }
+      const max = Math.max(...buckets.map(b => b.doc_count));
+      const rows = buckets.map(b => {
+        const pct = max > 0 ? (b.doc_count / max) * 100 : 0;
+        return '<tr><td>' + escapeHtml(String(b.key)) + '</td><td>' + b.doc_count + '</td><td><span class="bar" style="width:' + pct.toFixed(1) + '%"></span></td></tr>';
+      }).join('');
+      $('aggResult').innerHTML = '<table class="agg"><thead><tr><th>key</th><th>count</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>';
+    } else {
+      $('aggResult').innerHTML = '<div class="err">ERR ' + r.code + ' ' + (parsed ? JSON.stringify(parsed) : r.text) + '</div>';
+    }
+  }
+
+  function escapeHtml(s) {
+    return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  async function loadTasks() {
+    const r = await jget('/_tasks');
+    if (r.ok && r.json?.nodes) {
+      const all = Object.values(r.json.nodes).flatMap(n => n.tasks || []);
+      $('tasks').innerHTML = all.length === 0
+        ? '<div class="empty" style="padding:0">无</div>'
+        : all.map(t => '<div style="padding:2px 0"><span class="' + (t.status === 'completed' ? 'ok' : 'err') + '">' + t.status + '</span> ' + (t.action || '').split('/').pop() + '</div>').join('');
+    } else {
+      $('tasks').innerHTML = '<div class="empty" style="padding:0">-</div>';
+    }
+  }
+
+  async function loadCluster() {
+    const r = await jget('/_cluster/health');
+    if (r.ok && r.json) {
+      $('cluster').innerHTML =
+        '<div><b>' + r.json.status + '</b><span>cluster status</span></div>' +
+        '<div><b>' + r.json.number_of_nodes + '</b><span>nodes</span></div>' +
+        '<div><b>' + r.json.active_shards + '</b><span>shards</span></div>' +
+        '<div><b>' + r.json.unassigned_shards + '</b><span>unassigned</span></div>';
+    }
+  }
+
+  loadHeader();
+  loadIndices();
+  loadCluster();
+  loadTasks();
+  setInterval(() => { loadHeader(); loadTasks(); }, 5000);
+  setInterval(loadIndices, 10000);
+</script>
+</body>
+</html>

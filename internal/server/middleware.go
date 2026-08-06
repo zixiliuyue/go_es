@@ -1,4 +1,8 @@
 // 中间件与公共响应工具
+//
+// 历史: 早期版本的 withMiddleware/recover/trace 逻辑已迁出到 guards.go,
+// 这里只保留通用响应工具(writeError / writeJSON / decodeJSON / splitPath)
+// 与 statusWriter 包装器(给业务 handler 写非 200 状态码用).
 package server
 
 import (
@@ -6,39 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
-
-	"go.uber.org/zap"
 )
-
-// withMiddleware 包装 mux,加日志、recover、错误格式
-func (s *Server) withMiddleware(h http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// go-elasticsearch v8 客户端在建立连接时会做"产品嗅探":
-		// 期望服务端在响应中带 X-Elastic-Product: Elasticsearch 头
-		// 我们用自研服务端冒充 ES 时,需要补上此头才能让 SDK 客户端接受
-		w.Header().Set("X-Elastic-Product", "Elasticsearch")
-		start := time.Now()
-		defer func() {
-			if rec := recover(); rec != nil {
-				s.logger.Error("panic in handler",
-					zap.Any("panic", rec),
-					zap.String("path", r.URL.Path))
-				writeError(w, http.StatusInternalServerError,
-					"server_error", "internal server error", "")
-			}
-		}()
-		s.logger.Debug("request",
-			zap.String("method", r.Method),
-			zap.String("path", r.URL.Path))
-		ww := &statusWriter{ResponseWriter: w, status: 200}
-		h.ServeHTTP(ww, r)
-		s.logger.Debug("response",
-			zap.String("method", r.Method),
-			zap.String("path", r.URL.Path),
-			zap.Int("status", ww.status),
-			zap.Duration("cost", time.Since(start)))
-	})
-}
 
 // statusWriter 包装 ResponseWriter 以便记录状态码
 type statusWriter struct {
@@ -114,3 +86,6 @@ func splitPath(p string) []string {
 	}
 	return strings.Split(p, "/")
 }
+
+// 抑制 time 包未用警告(早期版本在 withMiddleware 用了 time.Now, 现已迁出)
+var _ = time.Now

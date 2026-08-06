@@ -268,7 +268,10 @@ func (s *Server) runPipelineBody(pipeline map[string]interface{}, doc map[string
 }
 
 // _reindex
-
+//
+// 支持 wait_for_completion 查询参数:
+//   - true(默认): 同步执行, 返回统计
+//   - false:      异步执行, 立即返回 taskID, 客户端可轮询 /_tasks/{id}
 func (s *Server) handleReindex(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Source map[string]interface{} `json:"source"`
@@ -294,6 +297,23 @@ func (s *Server) handleReindex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// wait_for_completion=false -> 异步
+	if r.URL.Query().Get("wait_for_completion") == "false" {
+		taskID := globalTaskManager.Submit("indices:data/write/reindex", func(e *taskEntry) {
+			s.runReindex(srcIdx, dest, e)
+		})
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"task": taskID,
+		})
+		return
+	}
+
+	// 同步模式
+	writeJSON(w, http.StatusOK, s.doReindexSync(srcIdx, dest))
+}
+
+// doReindexSync 同步 reindex, 返回 ES 风格统计
+func (s *Server) doReindexSync(srcIdx, dest string) map[string]interface{} {
 	ids := s.engine.AllIDs(srcIdx)
 	total := int64(len(ids))
 	var created int64
@@ -308,7 +328,7 @@ func (s *Server) handleReindex(w http.ResponseWriter, r *http.Request) {
 		s.engine.IndexDoc(dest, id, src)
 		created++
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	return map[string]interface{}{
 		"took":      0,
 		"timed_out": false,
 		"total":     total,
@@ -316,7 +336,50 @@ func (s *Server) handleReindex(w http.ResponseWriter, r *http.Request) {
 		"updated":   0,
 		"batches":   1,
 		"failures":  []interface{}{},
-	})
+	}
+}
+
+// runReindex 异步 reindex, 在 taskEntry 中更新进度并响应 cancel
+func (s *Server) runReindex(srcIdx, dest string, e *taskEntry) {
+	ids := s.engine.AllIDs(srcIdx)
+	e.info.Progress.Total = int64(len(ids))
+
+	for i, id := range ids {
+		select {
+		case <-e.cancel:
+			e.info.Status = TaskStatusCancelled
+			return
+		default:
+		}
+		src, ok := s.engine.GetSource(srcIdx, id)
+		if !ok {
+			continue
+		}
+		if err := s.store.Put(storage.DocKey(dest, id), src); err != nil {
+			e.info.Progress.Failures++
+			continue
+		}
+		s.engine.IndexDoc(dest, id, src)
+		e.info.Progress.Created++
+		// 周期性的 batch 计数(每 500 算一批)
+		if (i+1)%500 == 0 {
+			e.info.Progress.Batches++
+		}
+	}
+	if e.cancelled.Load() {
+		e.info.Status = TaskStatusCancelled
+		return
+	}
+	e.info.Status = TaskStatusCompleted
+	e.info.Response = map[string]interface{}{
+		"took":      0,
+		"timed_out": false,
+		"total":     e.info.Progress.Total,
+		"created":   e.info.Progress.Created,
+		"updated":   0,
+		"batches":   e.info.Progress.Batches + 1,
+		"failures":  []interface{}{},
+	}
 }
 
 // 快照

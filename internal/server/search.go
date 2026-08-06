@@ -16,8 +16,24 @@ func (s *Server) handleSearchAll(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleSearchForName POST /{index}/_search
+// 兼容保留: index 段视为精确名
 func (s *Server) handleSearchForName(w http.ResponseWriter, r *http.Request, index string) {
 	s.doSearch(w, r, []string{index})
+}
+
+// handleSearchForNamePattern POST /{index}/_search
+// index 段支持通配: *, prefix*, idx1,idx2, -foo 等
+func (s *Server) handleSearchForNamePattern(w http.ResponseWriter, r *http.Request, pattern string) {
+	indices := s.getIndicesByPattern(pattern)
+	if len(indices) == 0 {
+		var req searchRequest
+		if r.ContentLength > 0 {
+			_ = decodeJSON(r, &req)
+		}
+		writeJSON(w, http.StatusOK, buildEmptyResponse(req))
+		return
+	}
+	s.doSearch(w, r, indices)
 }
 
 // doSearch 实际搜索逻辑

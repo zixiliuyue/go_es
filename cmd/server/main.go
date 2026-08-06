@@ -4,9 +4,13 @@
 // 用法:
 //
 //	go run ./cmd/server -addr :9200 -data /tmp/go_es_data
+//	go run ./cmd/server -config ./go_es.yaml
 //
 // 默认监听 :9200,数据目录为当前目录下的 ./data
 // 通过环境变量 ES_ADDR / ES_DATA 可覆盖
+//
+// 配置文件格式见 internal/server/config.go.
+// 配置文件可热更新(每 5s 轮询 mtime), 修改后无需重启.
 package main
 
 import (
@@ -17,22 +21,63 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/zixiliuyue/go_es/internal/search"
 	"github.com/zixiliuyue/go_es/internal/server"
 	"github.com/zixiliuyue/go_es/internal/storage"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 	"go.uber.org/zap"
 )
 
 func main() {
-	addr := flag.String("addr", envOr("ES_ADDR", ":9200"), "HTTP listen address")
+	addr := flag.String("addr", envOr("ES_ADDR", ":9200"), "HTTP listen address (override by -config)")
 	data := flag.String("data", envOr("ES_DATA", "./data"), "BadgerDB data directory (empty for in-memory)")
+	authUser := flag.String("auth.user", "", "Basic auth username (empty disables auth)")
+	authPass := flag.String("auth.password", "", "Basic auth password")
+	maxBody := flag.Int("max-body", 100, "max request body size in MiB")
+	rate := flag.Float64("rate", 0, "per-IP rate limit (rps, 0 = unlimited)")
+	configPath := flag.String("config", "", "path to YAML config file (overrides flags; supports hot reload)")
 	flag.Parse()
 
 	logger, _ := zap.NewDevelopment()
 	defer func() { _ = logger.Sync() }()
+
+	// 配置加载: -config 优先, 其次命令行 flag
+	loader := server.NewConfigLoader(*configPath)
+	if *configPath != "" {
+		if err := loader.Load(); err != nil {
+			log.Fatalf("load config: %v", err)
+		}
+		cfg := loader.Get()
+		// -config 优先生效
+		if cfg.Addr != "" {
+			*addr = cfg.Addr
+		}
+		if cfg.Data != "" {
+			*data = cfg.Data
+		}
+		if cfg.Auth.Enabled {
+			*authUser = "" // 让下面 cfg.Auth 直接覆盖
+		}
+		if cfg.Limit.MaxBodyBytes > 0 {
+			*maxBody = int(cfg.Limit.MaxBodyBytes >> 20)
+		}
+		if cfg.Limit.RatePerSecond > 0 {
+			*rate = cfg.Limit.RatePerSecond
+		}
+		// 热更新: 每 5s 轮询, 改动后仅刷新 auth/limit(其它启动时决定)
+		loader.SetOnChange(func(old, new *server.ConfigFile) {
+			logger.Info("config reloaded",
+				zap.String("path", *configPath),
+				zap.Bool("auth_enabled", new.Auth.Enabled))
+		})
+		go loader.Watch()
+		defer loader.Stop()
+	}
 
 	store, err := storage.Open(*data)
 	if err != nil {
@@ -45,28 +90,69 @@ func main() {
 		logger.Warn("load all failed", zap.Error(err))
 	}
 
-	srv := server.New(store, engine, logger)
+	// 认证配置: -config 优先
+	auth := server.AuthConfig{Enabled: false}
+	if loader.Get().Auth.Enabled {
+		auth = loader.Get().Auth
+	} else if *authUser != "" {
+		auth.Enabled = true
+		auth.Basic = map[string]string{*authUser: *authPass}
+	}
+	// 收集 -apikey 参数(从 flag.Args() 解析 key=value)
+	for _, a := range flag.Args() {
+		if k, v, ok := splitKV(a); ok && k == "apikey" && v != "" {
+			auth.Enabled = true
+			auth.APIKeys = append(auth.APIKeys, v)
+		}
+	}
+	// 限速与体限制: -config 优先
+	limit := server.LimitConfig{
+		MaxBodyBytes:  int64(*maxBody) << 20,
+		RatePerSecond: *rate,
+	}
+	if cfg := loader.Get(); cfg.Limit.MaxBodyBytes > 0 {
+		limit.MaxBodyBytes = cfg.Limit.MaxBodyBytes
+	}
+	if cfg := loader.Get(); cfg.Limit.RatePerSecond > 0 {
+		limit.RatePerSecond = cfg.Limit.RatePerSecond
+	}
+
+	srv := server.NewWithOptions(store, engine, logger, server.ServerOptions{
+		Auth:  auth,
+		Limit: limit,
+	})
+	srv.MarkStartupDone()
 	httpSrv := &http.Server{
 		Addr:              *addr,
 		Handler:           srv.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+	// 启用明文 HTTP/2(h2c), 不需要 TLS, 适合内部服务
+	// 降级不影响 HTTP/1.1 客户端
+	h2cConfigure(httpSrv)
 
-	// 优雅关闭
+	// 优雅关闭: 标记 shutting down + 等待 inflight 任务
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	go func() {
-		logger.Info("go_es server listening", zap.String("addr", *addr), zap.String("data", *data))
+		logger.Info("go_es server listening",
+			zap.String("addr", *addr),
+			zap.String("data", *data),
+			zap.Bool("auth_enabled", auth.Enabled),
+			zap.Int64("max_body_bytes", limit.MaxBodyBytes),
+			zap.Float64("rate_per_second", limit.RatePerSecond))
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("listen: %v", err)
 		}
 	}()
 
 	<-ctx.Done()
-	logger.Info("shutting down...")
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	logger.Info("shutting down... waiting for inflight tasks to drain")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	// 先标记服务进入 shutting down(readiness 会立即返回 503)
+	srv.Shutdown(shutdownCtx)
 	_ = httpSrv.Shutdown(shutdownCtx)
 }
 
@@ -76,4 +162,23 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// splitKV 解析 "key=value" 形式
+func splitKV(s string) (string, string, bool) {
+	for i := 0; i < len(s); i++ {
+		if s[i] == '=' {
+			return s[:i], s[i+1:], true
+		}
+	}
+	return "", "", false
+}
+
+// 抑制 strconv 未用警告
+var _ = strconv.Itoa
+
+// h2cConfigure 给 httpSrv 启用明文 HTTP/2(h2c).
+// 客户端发普通 HTTP/1.1 也能正常用, 不会回归.
+func h2cConfigure(httpSrv *http.Server) {
+	httpSrv.Handler = h2c.NewHandler(httpSrv.Handler, &http2.Server{})
 }

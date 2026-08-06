@@ -164,36 +164,75 @@ func (e *Engine) evalTerms(index string, fields map[string]interface{}) (map[str
 
 // evalRange 处理 range 查询
 // 支持 gte/lte/gt/lt,值可为数字或字符串(字符串比较用字典序)
+// 走 sortedIndexCache, O(logN + K) 而非 O(N)
 func (e *Engine) evalRange(index string, fields map[string]interface{}) (map[string]struct{}, error) {
+	out := map[string]struct{}{}
 	if len(fields) == 0 {
 		return nil, fmt.Errorf("range requires at least one field")
 	}
-	out := map[string]struct{}{}
 	for field, raw := range fields {
 		rng, _ := raw.(map[string]interface{})
-		gte := rng["gte"]
-		lte := rng["lte"]
-		gt := rng["gt"]
-		lt := rng["lt"]
-
+		var gte, lte, gt, lt *string
+		if s, ok := asStringKey(rng["gte"]); ok {
+			gte = &s
+		}
+		if s, ok := asStringKey(rng["lte"]); ok {
+			lte = &s
+		}
+		if s, ok := asStringKey(rng["gt"]); ok {
+			gt = &s
+		}
+		if s, ok := asStringKey(rng["lt"]); ok {
+			lt = &s
+		}
+		// 走 sortedCache; 若字段不索引(复杂类型), 回退到全表扫描
+		ids := e.sortedCache.rangeQuery(index, field, gte, lte, gt, lt)
+		if len(ids) == 0 && (gte == nil && lte == nil && gt == nil && lt == nil) {
+			// 没有值, 视为不命中
+			return out, nil
+		}
+		// 若 sortedCache 完全没有该 field, 退化到全表扫描
+		e.mu.RLock()
+		_, hasField := e.docs[index]
+		e.mu.RUnlock()
+		if !hasField {
+			return out, nil
+		}
+		// 退化判断: cache 返回 0 且该 index 确实有 docs 且 range 是非空 -> 走扫描
 		e.mu.RLock()
 		docs := e.docs[index]
 		e.mu.RUnlock()
-		if docs == nil {
-			return out, nil
+		if len(ids) == 0 && len(docs) > 0 {
+			// 可能是 field 不可索引(数组/嵌套), 走全表扫描
+			for id, doc := range docs {
+				v, ok := doc[field]
+				if !ok {
+					continue
+				}
+				if compareRange(v, rng["gte"], rng["lte"], rng["gt"], rng["lt"]) {
+					ids[id] = struct{}{}
+				}
+			}
 		}
-		for id, doc := range docs {
-			v, ok := doc[field]
-			if !ok {
-				continue
-			}
-			if compareRange(v, gte, lte, gt, lt) {
-				out[id] = struct{}{}
-			}
+		for id := range ids {
+			out[id] = struct{}{}
 		}
 		return out, nil
 	}
 	return out, nil
+}
+
+// asStringKey 把任意 JSON 值转为可用于 sorted index 比较的字符串键
+// 失败返回 ok=false
+func asStringKey(v interface{}) (string, bool) {
+	if v == nil {
+		return "", false
+	}
+	if s, ok := valueOf(v); ok {
+		return s, true
+	}
+	// 数组/对象等复杂类型, 走字符串化兜底
+	return stringify(v), true
 }
 
 // evalBool 处理 bool 查询

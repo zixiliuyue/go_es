@@ -22,8 +22,11 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/zixiliuyue/go_es/internal/search"
 	"github.com/zixiliuyue/go_es/internal/storage"
@@ -41,6 +44,20 @@ type Server struct {
 	clusterName string
 	clusterUUID string
 	router      *router
+	// 可观测/守卫(新加, 向后兼容)
+	metrics    *ServerMetrics
+	guards     *guards
+	shutdown   *ShutdownState
+	startedAt  time.Time
+	startupDone atomic.Bool
+}
+
+// ServerOptions 构造服务端的可选配置
+type ServerOptions struct {
+	// Auth 认证配置(Enabled=false 时不启用, 保持向后兼容)
+	Auth AuthConfig
+	// Limit 限流与体限制配置
+	Limit LimitConfig
 }
 
 // New 创建一个新的服务端
@@ -54,23 +71,41 @@ type Server struct {
 //
 //	*Server: 服务端实例
 func New(store *storage.Store, engine *search.Engine, logger *zap.Logger) *Server {
+	return NewWithOptions(store, engine, logger, ServerOptions{})
+}
+
+// NewWithOptions 创建带可选配置的服务端
+func NewWithOptions(store *storage.Store, engine *search.Engine, logger *zap.Logger, opts ServerOptions) *Server {
 	if logger == nil {
 		logger, _ = zap.NewProduction()
 	}
+	metrics := NewServerMetrics()
+	shutdown := &ShutdownState{}
 	s := &Server{
 		store:       store,
 		engine:      engine,
 		logger:      logger,
 		clusterName: "go_es_cluster",
 		clusterUUID: "go-es-self-hosted",
+		metrics:     metrics,
+		shutdown:    shutdown,
+		guards:      newGuards(logger, metrics, shutdown, opts.Auth, opts.Limit),
+		startedAt:   time.Now(),
 	}
 	s.router = s.buildRouter()
 	return s
 }
 
+// Shutdown 标记服务正在关闭并等待 inflight 任务排空(直到 ctx 结束或全部完成)
+func (s *Server) Shutdown(ctx context.Context) { s.shutdown.MarkShuttingDown(ctx) }
+
+// MarkStartupDone 启动完成后由 main 调用, 否则 /_health/startup 仍返回 503
+func (s *Server) MarkStartupDone() { s.startupDone.Store(true) }
+
 // Handler 返回 net/http.Handler
 func (s *Server) Handler() http.Handler {
-	return s.withMiddleware(http.HandlerFunc(s.router.ServeHTTP))
+	router := http.HandlerFunc(s.router.ServeHTTP)
+	return s.guards.chainMiddleware(router)
 }
 
 // buildRouter 构造路由表
@@ -117,6 +152,11 @@ func (s *Server) buildRouter() *router {
 	// /_reindex
 	rt.addExact("POST", []string{"_reindex"}, s.handleReindex)
 
+	// /_tasks 与 /_tasks/{id}  异步任务 API
+	rt.addExact("GET", []string{"_tasks"}, s.handleTaskList)
+	rt.addExact("GET", []string{"_tasks", "{id}"}, s.handleTaskGet)
+	rt.addExact("DELETE", []string{"_tasks", "{id}"}, s.handleTaskCancel)
+
 	// /_bulk 与 /<index>/_bulk(esapi.BulkRequest.Do 走 <index>/_bulk)
 	rt.addExact("POST", []string{"_bulk"}, s.handleBulk)
 	rt.addExact("PUT", []string{"_bulk"}, s.handleBulk)
@@ -134,6 +174,18 @@ func (s *Server) buildRouter() *router {
 	// /_cat/nodes 与 /_cat/indices
 	rt.addExact("GET", []string{"_cat", "nodes"}, s.handleCatNodes)
 	rt.addExact("GET", []string{"_cat", "indices"}, s.handleCatIndices)
+
+	// /_health/{liveness|readiness|startup}  K8s 探针端点
+	rt.addExact("GET", []string{"_health", "liveness"}, s.handleLiveness)
+	rt.addExact("GET", []string{"_health", "readiness"}, s.handleReadiness)
+	rt.addExact("GET", []string{"_health", "startup"}, s.handleStartup)
+
+	// /metrics  Prometheus 抓取端点
+	rt.addExact("GET", []string{"metrics"}, s.handleMetrics)
+
+	// /_ui/  与  /_ui/index.html  内置 Web 控制台
+	rt.addExact("GET", []string{"_ui"}, s.handleUI)
+	rt.addExact("GET", []string{"_ui", "index.html"}, s.handleUI)
 
 	// 兜底: {index}/...
 	rt.addIndexDispatcher(s.dispatchIndex)
@@ -189,8 +241,10 @@ func (s *Server) dispatchIndex(w http.ResponseWriter, r *http.Request, index str
 		return
 	}
 	// /{index}/_search
+	// {index} 段支持通配: *, prefix*, *suffix, prefix*suffix, idx1,idx2, -foo
 	if len(rest) >= 1 && rest[0] == "_search" && method == http.MethodPost {
-		s.handleSearchForName(w, r, index)
+		// 走专门的 handler, 让它用 getIndicesByPattern 展开
+		s.handleSearchForNamePattern(w, r, index)
 		return
 	}
 	// /{index}/_mapping

@@ -1,0 +1,18 @@
+# 自研服务端镜像(用于容器化集成测试与 dev)
+# 用法: docker compose -f docker-compose.test.yml up go_es_server
+
+FROM golang:1.25-alpine AS builder
+WORKDIR /src
+RUN go env -w GOPROXY=https://goproxy.cn,direct
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -o /out/go_es_server ./cmd/server
+
+FROM alpine:3.19
+RUN apk add --no-cache curl wget
+COPY --from=builder /out/go_es_server /usr/local/bin/go_es_server
+ENV ES_ADDR=:9200 \
+    ES_DATA=/data
+EXPOSE 9200
+ENTRYPOINT ["/usr/local/bin/go_es_server"]
