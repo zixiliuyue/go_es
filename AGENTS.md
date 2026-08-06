@@ -161,6 +161,11 @@ router 会把"路由模板"(如 `/{index}/_doc/{id}`)注入到 `r.Context()`,key
 | `-max-body` | `100` | 单请求体最大 MiB |
 | `-rate` | `0`(不限) | 单 IP 每秒允许的请求数 |
 | `-config` | (空) | YAML 配置文件路径;支持 mtime 热更新(默认 5s 轮询) |
+| `-tls.cert` | (空) | TLS 证书 PEM 路径;与 `-tls.key` 同时设置才生效 |
+| `-tls.key` | (空) | TLS 私钥 PEM 路径 |
+| `-tls.enable-http2` | `true` | 是否在 TLS 上协商 h2 |
+| `-tls.client-ca` | (空) | 客户端 CA 池 PEM 路径(启用 mTLS 时必填,与 `-tls.client-auth` 配对) |
+| `-tls.client-auth` | `none` | 客户端证书强制级别:`none`/`request`/`require_any`/`require_verify` |
 
 **生产部署前必开**:`-auth.user` + `-auth.password`(或 `apikey=...`)。
 
@@ -178,6 +183,12 @@ limit:
   max_body_bytes: 104857600 # 100 MiB
   rate_per_second: 1000
   burst: 1000
+tls:
+  cert: "/etc/go_es/server.crt"   # 空 = 关闭 TLS
+  key:  "/etc/go_es/server.key"
+  enable_http2: true              # 默认 true
+  client_ca: "/etc/go_es/client_ca.crt"  # 空 = 关闭 mTLS
+  client_auth: "require_verify"            # none/request/require_any/require_verify
 log_level: "info"
 watch_interval: 5s          # 轮询间隔(go duration)
 ```
@@ -199,9 +210,16 @@ watch_interval: 5s          # 轮询间隔(go duration)
 | `Dockerfile.server` | **自研服务端镜像**(跑 `cmd/server`) |
 | `docker-compose.yml` | demo compose: ES + demo 容器 |
 | `docker-compose.test.yml` | **测试 compose**: ES + 自研 server + tester |
+| `docker-compose.tls.test.yml` | **TLS 测试 compose**: 自研 server(启用 TLS+h2) + TLS tester |
+| `docker-compose.mtls.test.yml` | **mTLS 测试 compose**: 自研 server(启用 TLS+h2 + mTLS require_verify) + mTLS tester |
 | `scripts/wait-for-es.sh` | demo 用的 ES 探活 |
-| `scripts/test-in-docker.sh` | **测试入口**,自动拉起 + 清理 |
-| `scripts/e2e-tests.sh` | tester 容器内跑的端到端断言 |
+| `scripts/test-in-docker.sh` | **明文测试入口**,自动拉起 + 清理 |
+| `scripts/test-tls-in-docker.sh` | **TLS 测试入口**,自动生成自签证书 + 拉起 + 清理 |
+| `scripts/test-mtls-in-docker.sh` | **mTLS 测试入口**,自动生成 CA + server cert + client cert + 拉起 + 清理 |
+| `scripts/gen-test-cert.sh` | TLS/mTLS 测试用的自签证书生成器(无 `-m` 走单向 TLS,带 `-m` 走 mTLS 全套) |
+| `scripts/e2e-tests.sh` | tester 容器内跑的明文端到端断言 |
+| `scripts/e2e-tls-tests.sh` | tester 容器内跑的 TLS 端到端断言 |
+| `scripts/e2e-mtls-tests.sh` | tester 容器内跑的 mTLS 端到端断言(双向握手/拒绝无 cert/拒绝错误 CA) |
 
 **禁止**:在测试容器内手动改 data volume;测试脚本必须幂等,索引名带时间戳后缀。
 
@@ -237,19 +255,81 @@ watch_interval: 5s          # 轮询间隔(go duration)
   - **bulk 写合并** — `internal/server/bulk_batch.go` 提供 `bulkWriter` 封装 `badger.WriteBatch`;`internal/server/bulk.go` 改为先累积再 flush
   - **Web UI 增强** — `/_ui` 新增分页 (←/→)、聚合面板(terms aggregation 表格 + 进度条)、query type 选择(match/term/range/match_all)、从分筛选 JSON 表达式
   - **配置热加载**(建议 #15) — `internal/server/config.go` + `gopkg.in/yaml.v3`;`ConfigLoader` mtime 轮询(默认 5s);`cmd/server/main.go` 加 `-config` 启动参数;只对 auth/limit 生效,addr/data 需重启
+- 2026-08-06: 完成第四轮扩展 — **TLS / HTTP-2 over h2**:
+  - 新增 `-tls.cert` / `-tls.key` / `-tls.enable-http2` 启动参数,以及 yaml 中 `tls: { cert, key, enable_http2 }` 块
+  - `EnableHTTP2` 用 `*bool` 区分"未设置"与"显式 false",yaml 显式给值时覆盖 flag 默认
+  - `cmd/server/main.go` 抽 `configureTransport()`:TLS 路径用 `crypto/tls` 加载证书 + 显式 `http2.ConfigureServer`;明文路径保留 `h2c.NewHandler` 包一层(行为不变)
+  - cert+key 在启动期 `os.Stat` + `tls.LoadX509KeyPair` 双校验,失败立即 fail-fast
+  - 单元测试:`internal/server/config_test.go::TestConfigLoader_TLSBlock`(yaml 解析 + 单边/双边/未设 3 种状态);`cmd/server/main_test.go`(4 个 `configureTransport` case + 1 个真实 TLS handshake end-to-end)
+  - 容器化测试:`scripts/gen-test-cert.sh`(openssl 自签 P-256,SAN=localhost+127.0.0.1,1 天);`docker-compose.tls.test.yml`;`scripts/test-tls-in-docker.sh`;`scripts/e2e-tls-tests.sh` 覆盖 TLS 握手 / ALPN h2 协商 / 完整 CRUD / /metrics over TLS
+- 2026-08-06: 完成 reindex 进度精细化 — **reindexBatchSize: 500 → 100**:
+  - `internal/server/extras.go` 提取 `reindexBatchSize=100` 常量,循环内每 100 条 `Progress.Batches++`(原 500)
+  - 100 比 e2e 最小数据集 5 大,小批量仍走响应里 `+1` 兜底,语义不变
+  - 单元测试:`internal/server/extensions_test.go::TestTasks_ReindexBatchCounting` 用 250 条数据验证 循环内 Batches=2,Response.batches=3(原 batch=500 时同样 250 条只能 0+1=1,精细度提升 5x)
+- 2026-08-06: 完成 Web UI 增强 — **多 Tab + 历史 + 字段类型推断**:
+  - **多 Tab 系统**:`internal/server/web/index.html` 加 Tab 栏,每个 Tab 独立 `currentIndex/qField/qValue/qType/qFrom/qSize/aggField/aggSize/aggQuery/cached results/fieldMap`;新建/关闭/重命名(双击)+ 切换动画;`localStorage` keys `go_es_tabs` / `go_es_active_tab` 持久化
+  - **历史查询**:每次 `runSearch`/`runAgg` 成功 push 一条 `{ts,type,tabTitle,summary,params}`,抽屉面板支持内容搜索/类型筛选/时间筛选(1h/1d/7d/全部),`replayHistory()` 一键重跑 + `deleteHistory()`/`clearHistory()` 单删清空;最多 200 条 FIFO 截断,key `go_es_history`
+  - **字段类型推断**:Tab 选索引时拉 `/{idx}/_mapping` + 1 条 `_search` 抽样,综合 ES mapping type + JS 推断(`string|number|integer|boolean|date|object` 6 种);qField input 加 `<datalist>` 自动补全;value 控件按类型切换(number/date/checkbox/text);新增字段 chips 面板,点击填入字段;聚合结果 key 按类型着色
+  - 响应式: `@media (max-width:900px)` 左侧栏折叠;Tab 切换 0.15s fadein + 0.2s 历史抽屉 transform 动画
+  - 向后兼容:保留 `runSearch/runAgg/loadIndices/selectIndex/loadCluster/prevPage/nextPage` 全局函数名 + `go_es · 控制台` 标题,e2e 既有断言不破
+  - 单元测试:`internal/server/extensions2_test.go` 新增 5 个 TestUI_*(MultiTabSurface/HistorySurface/FieldInferenceSurface/BackwardCompat/PageSizeReasonable)
+  - e2e:`scripts/e2e-tests.sh` section 9 拆 9a/9b/9c/9d,新增 14 条断言(Tab 栏/newTab/closeTab/localStorage 键/history 抽屉/replayHistory/field chips/extractFieldMap/inferType/checkbox/date/number 等);总体 51/51 通过
+- 2026-08-06: 完成 YAML 配置 schema 校验 — **启动期语义校验**:
+  - 新增 `internal/server/config_schema.go`:`ConfigSchema` 结构 + `FieldRule{Path,Kind,Message,...}` 数据驱动规则;`ValidationError`/`ValidationErrors`(聚合,按 Path 排序,稳定输出)
+  - 规则类型:`required / type / range / enum / pattern / min_len / max_len / cross_field`(跨字段业务规则,支持 `When` 条件);`Min/Max` 用 `*float64` 区分"未设置"与"=0",允许规则限定包含 0
+  - 零值跳过:非 required/cross_field 规则在零值(nil/""/0/false/`time.Duration(0)`)上自动跳过,避免对"未设置"项报错(由 required 单独抓)
+  - 覆盖范围:addr 必为 `:port` 形式 / auth.enabled=true 须有凭据 / TLS cert+key 须同时配置 / limit 三项数值范围(0~1GiB / 0~1e7 / 0~1e6) / log_level enum(debug/info/warn/error) / watch_interval 0~1h / `*bool` 区分 nil 与显式 false
+  - 集成: `ConfigLoader.Load()` 在 `yaml.Unmarshal` 之后 + 提交 `current` 之前调 `DefaultConfigSchema().Validate()` + `SanityCheck()`;失败 wrap 为 `fmt.Errorf("validate config: %w", errs)`,与 parse 错误同级触发 `log.Fatalf` 启动退出;`current` 保持上一次合法值,热更新不会回写到坏状态
+  - 错误信息格式: `config: <path> <reason> (实际值=<val>)`, 路径点分 + 期望规则 + 实际值
+  - 可维护性:规则全部在 `DefaultConfigSchema()` 集中声明,加新字段时只补规则,不动核心 `applyRule`/`Validate`;无第三方依赖
+  - 单元测试:`internal/server/config_test.go` 新增 17 个 `TestSchema_*`(正常/必填/类型/范围/枚举/业务规则/错误聚合/错误格式/wrap/失败不改 current/范围下限 0/pattern/*bool 显式 false/SanityCheck 端口),共 23 个 TestConfigLoader+TestSchema 全过
+  - 集成测试:`scripts/test-in-docker.sh` host-side 三个 case(坏 log_level+max_body_bytes、TLS 单边、auth.enabled=true 无凭据)验证启动期非 0 退出 + 错误信息含 "validate config" / "必须同时配置" 关键词
+- 2026-08-06: 完成 reindex 取消回滚 — **目标索引回滚到 reindex 前状态**:
+  - `internal/server/extras.go::runReindex` 增加 `written []string` 记录本次 reindex 过程中成功 Put 到目标索引的 doc id;取消时调用新 `rollbackReindex()` 逐个反向 Delete(store + engine)
+  - 取消语义: 取消时已写入目标索引的 doc 全部回滚;目标索引原本存在的 doc 保持不变;目标索引原本为空则取消后为 0(行为与"从未 reindex 过"等价);状态=TaskStatusCancelled,Created/Batches 重置 0
+  - 双检查点:循环内 `<-e.cancel` 立即回滚;循环跑完后**再次** `cancelled.Load()`,避免"循环完成 -> cancel 到达 -> 状态已置 completed"的竞态
+  - **修复 taskEntry 既有数据竞争**: 加 `sync.Mutex` 保护 `info` 字段;新增 `snapshot()` 持锁读 + `withInfo(fn)` 持锁写;`runReindex` 全字段改走 `withInfo`;`go test -race` 5/5 绿
+  - 单元测试: `internal/server/extensions_test.go` 新增 3 个 `TestTasks_Reindex*`(RollsBackWritten/PreservesPreExisting/NoCancelDoesNotRollback),用 200 条数据保证 cancel 命中窗口;5 个 reindex 测试全过
+  - e2e: `scripts/e2e-tests.sh` section 4b 验证容器环境下 reindex + 立即 DELETE /_tasks/{id} + 检查目标索引 0 docs;53/53 全过
+- 2026-08-06: 完成 mTLS 双向认证 — **TLS 单向扩展为支持 mTLS**:
+  - `internal/server/config.go::TLSConfig` 新增 `ClientCAFile` (PEM CA 池路径) + `ClientAuth *string`(指针, 区分未设与显式 none);新枚举类型 `ClientAuthKind` (none/request/require_any/require_verify);新方法 `MTLSEnabled()` 与 `AuthKind()`
+  - schema 新规则: `tls.client_ca` 字符串/类型 + `tls.client_auth` 4 值枚举 + 业务规则(设 client_ca 时 auth 不能 none, 非 none 时必须配 client_ca);`KindEnum` 扩展接受 `*string`
+  - `cmd/server/main.go` 新 flag `-tls.client-ca` / `-tls.client-auth`(默认 none);启动期 fail-fast 校验 4 种错配;`configureTransport()` 加 mTLS 分支(加载 CA 池 + 注入 ClientCAs + 映射 ClientAuth);新 `clientAuthToTLS()` 把内部枚举映射到 `crypto/tls.ClientAuthType`
+  - 单元测试: `internal/server/config_test.go` 新增 5 个 `TestSchema_MTLS*`(SingleSide_CAWithoutAuth/AuthWithoutCA/ValidFull/ClientAuthInvalidEnum);`cmd/server/main_test.go` 新增 5 个 `TestConfigureTransport_MTLS*` + `TestMTLSEndToEnd_RequireVerify`(真实双向握手 + 拒绝无 cert)+ `TestClientAuthToTLS`;`go test -race` 全过
+  - `scripts/gen-test-cert.sh` 加 `-m` 模式:生成自签 CA + CA 签发的 server cert + CA 签发的 client cert;SAN 加 `DNS:go_es_server`(docker 容器名);openssl `x509 -req -extfile` 必须显式 `-extensions v3_req` 才能挂上 EKU
+  - 新增 `docker-compose.mtls.test.yml` + `scripts/test-mtls-in-docker.sh` + `scripts/e2e-mtls-tests.sh`(独立 project + 端口 19203,不与 TLS test 互扰)
+  - mTLS 容器化关键点: **不使用 docker healthcheck**(healthcheck 不带 client cert 会被服务端拒);改由主机侧 curl + cert 等待
+  - e2e: `e2e-mtls-tests.sh` 10/10 — 双向握手/ALPN h2/完整 CRUD/无 cert 拒绝/错误 CA 签发 cert 拒绝;明文 53 + TLS 9 + mTLS 10 全过
+- 2026-08-06: 完成 Web UI 拖拽 + 导入导出 — **Tab 排序/拖出关闭/跨会话状态保存**:
+  - `internal/server/web/index.html` 拖拽:每个 `.tab` 加 `draggable="true"`;`onTabDragStart` 记录源 id + `onTabDragOver` 用目标水平中线算 before/after + `onTabDrop` 重排 `tabs[]`;视觉提示 `drag-over-left`/`drag-over-right` 蓝色侧边条
+  - 拖出 tabbar 关闭:`onTabDragEnd` 用 `getBoundingClientRect()` 判定鼠标位置,不在 tabbar 矩形内则 `closeTab(dragSourceId)`,toast 提示
+  - 导入导出:header 加 2 个按钮 + 隐藏 file input;`buildExportPayload()` 输出 `{version:1, exportedAt, tabs, activeTabId, history}`;`exportTabs()` 走 `Blob + URL.createObjectURL + a.click` 下载 `go_es_tabs_<ts>.json`;`importTabs()` 走 `FileReader + JSON.parse + validateImportPayload()`;导入有 `merge`/`replace` 双模式(`confirm` 询问用户)
+  - 安全: `validateImportPayload` 严格校验 version=1 / tabs 数组 / 每个 tab 有 id+title / history 是数组 / activeTabId 是字符串, 防 XSS/坏数据
+  - 单元测试:`internal/server/extensions2_test.go` 新增 3 个 `TestUI_*`:DragAndDropSurface (10 hook 字符串)/ ImportExportSurface (13 hook + 按钮)/ ImportPayloadSpec (Go 侧 round-trip 验证 JSON spec)
+  - e2e:`scripts/e2e-tests.sh` section 9e/9f,新增 20 条断言(拖拽 handlers/视觉/导入导出按钮/函数/浏览器 API);73/73 全过
+- 2026-08-06: 完成 Web UI 历史图表 — **纯 SVG 24h 调用频次可视化**:
+  - `internal/server/web/index.html` 新增 `.chartwrap` 区域(在历史面板的 filter 与列表之间),含标题"最近 24h 调用频次"+ 图例 + `<div id="histChart">`
+  - `renderHistoryChart()` 纯 SVG 柱状图:24 个小时桶(idx 0=最老,23=当前),每个桶内 search/agg 双柱并列(蓝 #1f6feb / 紫 #d2a8ff);viewBox 320×90,自适应宽度;x 轴 4 标签(-24h / -16h / -8h / now);y 轴显示 max 值;每根柱 `<title>` 悬停提示
+  - 累计副标题:基于全部 history(不只是 24h 内)统计 search vs agg 总数 + 百分比
+  - 触发点: `pushHistory`(成功搜索/聚合时)+ `clearHistory`(清空)+ `toggleHistory`(打开面板时)+ `importTabs`(导入后)
+  - 空态: history 为空时显示"暂无数据"
+  - 单元测试:`internal/server/extensions2_test.go::TestUI_ChartSurface` 11 个 hook 字符串 + 验证 pushHistory 函数体内含 `renderHistoryChart()` 调用
+  - e2e:`scripts/e2e-tests.sh` section 9g,8 条断言(SVG/挂载点/CSS/柱元素/双柱颜色/空态文案);81/81 全过
 
 ### 已实现完整覆盖
 - 倒排索引查询引擎(range 已倒排化, term/match 原本就是倒排)
-- HTTP/2 + gzip
+- HTTP/2 (h2c + h2)
+- TLS / h2
+- mTLS(双向证书认证)
+- gzip
 - 跨索引通配模式
-- 内置 Web UI(含分页/聚合)
-- 配置加载 + 热更新(只读侧, addr/data 启动后不可变)
+- 内置 Web UI(多 Tab + 历史 + 字段类型推断 + 拖拽排序/拖出关闭 + 导入导出 + **历史图表**)
+- 配置加载 + 热更新(只读侧, addr/data/tls 启动后不可变)
 - 写合并(bulk 路径,单 doc 写仍走原路径)
+- reindex 进度精细化(batch=100) + 取消回滚
+- YAML 配置 schema 校验(启动期, 数据驱动, 错误聚合)
 
 ### 待办(更长期)
-- 增量 reindex 进度(目前 batch 计数每 500 跳一次, 改为 100)
-- Web UI: 多索引 Tab 切换 / 历史查询 / 字段类型推断
-- 配置文件 schema 校验(目前 yaml 解析失败会启动报错)
-- TLS 支持(HTTP/2 over h2, 当前仅 h2c)
+(所有本期工作已完成; 后续按需增量)
 
 实施前请先在本节加"实现记录"段,说明日期与作者。
