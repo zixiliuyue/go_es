@@ -1,0 +1,52 @@
+# TLS 容器化集成测试编排
+# 与 docker-compose.test.yml(明文 h2c) 隔离, 独立 project 名
+# 启动一个自研 server, 启用 TLS + h2
+# 端口映射到 19202
+
+services:
+  go_es_server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    container_name: ${PROJ:-go_es_tls_test}_go_es
+    command:
+      - "-addr=:9200"
+      - "-data=/data"
+      - "-tls.cert=/certs/server.crt"
+      - "-tls.key=/certs/server.key"
+      - "-tls.enable-http2=true"
+    environment:
+      - ES_ADDR=:9200
+      - ES_DATA=/data
+    volumes:
+      - go_es_data:/data
+      - ${TLS_CERT_DIR}:/certs:ro
+    ports:
+      - "${HOST_GO_ES_TLS_PORT:-19202}:9200"
+    healthcheck:
+      # 用 openssl 走 TLS 拉活; 若 openssl 不在镜像里则退回到 wget -S 的 https 拉活
+      test: ["CMD-SHELL", "wget -qO- --no-check-certificate https://localhost:9200/_health/liveness >/dev/null 2>&1 || exit 1"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+    networks: [tlsnet]
+
+  tester:
+    image: alpine:3.19
+    container_name: ${PROJ:-go_es_tls_test}_tester
+    depends_on:
+      go_es_server:
+        condition: service_healthy
+    environment:
+      - GO_ES_TLS_URL=https://go_es_server:9200
+    volumes:
+      - ./scripts/e2e-tls-tests.sh:/e2e-tls-tests.sh:ro
+    entrypoint: ["sh", "/e2e-tls-tests.sh"]
+    networks: [tlsnet]
+
+networks:
+  tlsnet:
+    driver: bridge
+
+volumes:
+  go_es_data:
