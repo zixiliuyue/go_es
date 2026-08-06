@@ -139,6 +139,42 @@ if echo "$LIST" | grep -q "$TASK_ID"; then ok "task in /_tasks list"; else fail 
 # 取消不存在的任务 -> 404
 assert_status "cancel unknown -> 404" 404 DELETE "$GO_ES_URL/_tasks/nope"
 
+# 4b. reindex 取消回滚: 取消后目标索引被回滚
+header "4b. 异步 reindex 取消回滚"
+TS_RB=$(date +%s%N)
+RB_SRC="rb_src_${TS_RB}"
+RB_DST="rb_dst_${TS_RB}"
+curl -s -X PUT "$GO_ES_URL/$RB_SRC" >/dev/null
+curl -s -X PUT "$GO_ES_URL/$RB_DST" >/dev/null
+# 写 1000 条源数据, 保证 reindex 耗时足够 cancel 命中
+for i in $(seq 1 1000); do
+  curl -s -X PUT "$GO_ES_URL/$RB_SRC/_doc/$i" -H 'Content-Type: application/json' -d "{\"v\":$i}" >/dev/null
+done
+
+RB_ASYNC=$(curl -s -X POST "$GO_ES_URL/_reindex?wait_for_completion=false" -H 'Content-Type: application/json' -d "{\"source\":{\"index\":[\"$RB_SRC\"]},\"dest\":{\"index\":\"$RB_DST\"}}")
+RB_TASK=$(echo "$RB_ASYNC" | jq -r '.task // empty' 2>/dev/null)
+if [ -n "$RB_TASK" ]; then
+  ok "reindex 取消用例启动, task=$RB_TASK"
+  # 立刻 cancel
+  curl -s -X DELETE "$GO_ES_URL/_tasks/$RB_TASK" >/dev/null
+  # 等待任务 completed (cancelled 也算 completed)
+  for i in $(seq 1 50); do
+    RB_DONE=$(curl -s "$GO_ES_URL/_tasks/$RB_TASK" | jq -r '.completed // false' 2>/dev/null)
+    if [ "$RB_DONE" = "true" ]; then break; fi
+    sleep 0.1
+  done
+  # 关键断言: 目标索引 _search 应返回 0 docs(回滚生效)
+  # 200 条里 cancel 中断位置不固定, 但要么没写要么被回滚, 不会停在中间
+  RB_HITS=$(curl -s -X POST "$GO_ES_URL/$RB_DST/_search" -H 'Content-Type: application/json' -d '{"query":{"match_all":{}}}' | jq -r '.hits.total.value // 0' 2>/dev/null)
+  if [ "$RB_HITS" = "0" ]; then
+    ok "reindex 取消后目标索引为 0 docs (回滚生效)"
+  else
+    fail "reindex 回滚" "目标索引应 0 docs, 实际=$RB_HITS"
+  fi
+else
+  fail "reindex 取消用例" "no task id, body=$RB_ASYNC"
+fi
+
 # 同步模式应仍可用, 且 created 至少 5
 SYNC=$(curl -s -X POST "$GO_ES_URL/_reindex" -H 'Content-Type: application/json' -d "{\"source\":{\"index\":[\"$SRC\"]},\"dest\":{\"index\":\"$DST\"}}")
 SYNC_CREATED=$(echo "$SYNC" | jq -r '.created // 0' 2>/dev/null)
@@ -195,6 +231,61 @@ assert_status "/_ui/index.html=200" 200 GET "$GO_ES_URL/_ui/index.html"
 # 认证白名单: 即便启用了 auth, /_ui 也应 200(单测覆盖; 这里只验证页面可加载)
 assert_contains "/_ui 含 JS" 'loadIndices' /tmp/last.json
 assert_contains "/_ui 含搜索入口" 'runSearch' /tmp/last.json
+
+# 9b. 多 Tab 系统
+assert_contains "/_ui 有 Tab 栏" 'id="tabBar"' /tmp/last.json
+assert_contains "/_ui 有 newTab 函数" 'function newTab()' /tmp/last.json
+assert_contains "/_ui 有 closeTab 函数" 'function closeTab(' /tmp/last.json
+assert_contains "/_ui localStorage go_es_tabs" 'go_es_tabs' /tmp/last.json
+
+# 9c. 历史查询面板
+assert_contains "/_ui 有历史抽屉" 'id="historyPanel"' /tmp/last.json
+assert_contains "/_ui 有 pushHistory" 'function pushHistory(' /tmp/last.json
+assert_contains "/_ui 有 replayHistory 一键重跑" 'function replayHistory(' /tmp/last.json
+assert_contains "/_ui localStorage go_es_history" 'go_es_history' /tmp/last.json
+
+# 9d. 字段类型推断 UI
+assert_contains "/_ui 有 field chips" 'id="fieldChips"' /tmp/last.json
+assert_contains "/_ui 有 extractFieldMap" 'function extractFieldMap(' /tmp/last.json
+assert_contains "/_ui 有 inferType" 'function inferType(' /tmp/last.json
+assert_contains "/_ui 渲染了 boolean checkbox" 'type="checkbox"' /tmp/last.json
+assert_contains "/_ui 渲染了 date picker" 'type="date"' /tmp/last.json
+assert_contains "/_ui 渲染了 number input" 'type="number"' /tmp/last.json
+
+# 9e. Tab 拖拽排序 + 拖出关闭
+assert_contains "/_ui drag handlers 存在" 'function onTabDragStart' /tmp/last.json
+assert_contains "/_ui dragend handler 存在" 'function onTabDragEnd' /tmp/last.json
+assert_contains "/_ui drop handler 存在" 'function onTabDrop' /tmp/last.json
+assert_contains "/_ui 拖出 tabbar 关闭" 'closeTab(dragSourceId)' /tmp/last.json
+assert_contains "/_ui 拖拽视觉 left 指示" 'drag-over-left' /tmp/last.json
+assert_contains "/_ui 拖拽视觉 right 指示" 'drag-over-right' /tmp/last.json
+# 验证 tab 元素启用了 draggable(在 renderTabs 里)
+assert_contains "/_ui tab 启用了 draggable" 'el.draggable = true' /tmp/last.json
+
+# 9f. Tab 导入 / 导出
+assert_contains "/_ui 导出按钮存在" 'id="exportBtn"' /tmp/last.json
+assert_contains "/_ui 导入按钮存在" 'id="importBtn"' /tmp/last.json
+assert_contains "/_ui 隐藏 file input 存在" 'id="importFile"' /tmp/last.json
+assert_contains "/_ui 接受 JSON 文件" 'accept="application/json,.json"' /tmp/last.json
+assert_contains "/_ui exportTabs 函数" 'function exportTabs()' /tmp/last.json
+assert_contains "/_ui importTabs 函数" 'function importTabs(ev)' /tmp/last.json
+assert_contains "/_ui buildExportPayload 函数" 'function buildExportPayload' /tmp/last.json
+assert_contains "/_ui validateImportPayload 函数" 'function validateImportPayload' /tmp/last.json
+assert_contains "/_ui payload version 字段" 'version: 1' /tmp/last.json
+assert_contains "/_ui payload exportedAt 字段" 'exportedAt' /tmp/last.json
+assert_contains "/_ui 浏览器下载 API" 'URL.createObjectURL' /tmp/last.json
+assert_contains "/_ui 浏览器读取 API" 'FileReader' /tmp/last.json
+assert_contains "/_ui 浏览器 Blob API" 'Blob(' /tmp/last.json
+
+# 9g. 历史图表(纯 SVG)
+assert_contains "/_ui renderHistoryChart 函数" 'function renderHistoryChart' /tmp/last.json
+assert_contains "/_ui histChart 挂载点" 'id="histChart"' /tmp/last.json
+assert_contains "/_ui chartwrap CSS 类" 'chartwrap' /tmp/last.json
+assert_contains "/_ui SVG viewBox" 'viewBox=' /tmp/last.json
+assert_contains "/_ui SVG 柱状图 <rect" '<rect' /tmp/last.json
+assert_contains "/_ui search 蓝 #1f6feb" 'fill="#1f6feb"' /tmp/last.json
+assert_contains "/_ui agg 紫 #d2a8ff" 'fill="#d2a8ff"' /tmp/last.json
+assert_contains "/_ui 空态文案" '暂无数据' /tmp/last.json
 
 # ---------- 10. gzip 协商 ----------
 header "10. gzip 协商头 (建议 #9 的 Vary 部分)"

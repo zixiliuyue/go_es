@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -339,15 +340,43 @@ func (s *Server) doReindexSync(srcIdx, dest string) map[string]interface{} {
 	}
 }
 
-// runReindex 异步 reindex, 在 taskEntry 中更新进度并响应 cancel
+// reindexBatchSize 异步 reindex 进度上报的批次大小.
+// 每处理 N 个文档, Progress.Batches 自增 1, 供 /_tasks/{id} 客户端感知精细进度.
+// 取 100 是为了让 5 条数据的最小测试也能至少跳 1 次(5 < 100 走 +1 兜底).
+const reindexBatchSize = 100
+
+// runReindex 异步 reindex, 在 taskEntry 中更新进度并响应 cancel.
+//
+// 取消语义: 取消时已写入目标索引的 doc 会被**逐个反向 Delete**(store + engine).
+// 行为上等价于"目标索引回到 reindex 前的状态":
+//   - 目标索引原本不存在 -> 取消后索引为空(用户视角与"从未 reindex 过"等价;
+//     索引本身仍存在, _cat/indices 可见, 但 doc count = 0)
+//   - 目标索引原本存在若干 doc -> 取消后那些原有 doc 保持不变, 新写入的被清理
+//
+// 进度字段在回滚完成后重置为 Created=0/Batches=0, 与 TaskStatusCancelled 状态一致.
+// info 字段的并发写通过 taskEntry.mu 保护(见 withInfo/snapshot).
 func (s *Server) runReindex(srcIdx, dest string, e *taskEntry) {
+	// written 记录本次 reindex 过程中成功 Put 到目标索引的 doc id 列表.
+	// 取消时只 Delete 这些, 不动目标索引原本存在的 doc(若 pre-existing 有).
+	written := make([]string, 0, 64)
+
 	ids := s.engine.AllIDs(srcIdx)
-	e.info.Progress.Total = int64(len(ids))
+	e.withInfo(func(info *TaskInfo) { info.Progress.Total = int64(len(ids)) })
+
+	cancelAfter := func() {
+		// 取消路径: 写 cancelled 状态, 触发回滚
+		e.withInfo(func(info *TaskInfo) {
+			info.Status = TaskStatusCancelled
+			info.Progress.Created = 0
+			info.Progress.Batches = 0
+		})
+		s.rollbackReindex(dest, written)
+	}
 
 	for i, id := range ids {
 		select {
 		case <-e.cancel:
-			e.info.Status = TaskStatusCancelled
+			cancelAfter()
 			return
 		default:
 		}
@@ -356,29 +385,60 @@ func (s *Server) runReindex(srcIdx, dest string, e *taskEntry) {
 			continue
 		}
 		if err := s.store.Put(storage.DocKey(dest, id), src); err != nil {
-			e.info.Progress.Failures++
+			e.withInfo(func(info *TaskInfo) { info.Progress.Failures++ })
 			continue
 		}
 		s.engine.IndexDoc(dest, id, src)
-		e.info.Progress.Created++
-		// 周期性的 batch 计数(每 500 算一批)
-		if (i+1)%500 == 0 {
-			e.info.Progress.Batches++
-		}
+		written = append(written, id)
+		e.withInfo(func(info *TaskInfo) {
+			info.Progress.Created++
+			// 周期性的 batch 计数(每 reindexBatchSize 算一批)
+			if (i+1)%reindexBatchSize == 0 {
+				info.Progress.Batches++
+			}
+		})
 	}
 	if e.cancelled.Load() {
-		e.info.Status = TaskStatusCancelled
+		cancelAfter()
 		return
 	}
-	e.info.Status = TaskStatusCompleted
-	e.info.Response = map[string]interface{}{
-		"took":      0,
-		"timed_out": false,
-		"total":     e.info.Progress.Total,
-		"created":   e.info.Progress.Created,
-		"updated":   0,
-		"batches":   e.info.Progress.Batches + 1,
-		"failures":  []interface{}{},
+	e.withInfo(func(info *TaskInfo) { info.Status = TaskStatusCompleted })
+	// 提交前再检查一次, 避免 "循环完成 -> cancel 到达 -> 状态已置 completed" 的竞态
+	if e.cancelled.Load() {
+		cancelAfter()
+		return
+	}
+	// 收集最终进度, 写 Response(只读一次, 避免在多次 Lock 间被改)
+	var total, created, batches int64
+	e.withInfo(func(info *TaskInfo) {
+		total = info.Progress.Total
+		created = info.Progress.Created
+		batches = info.Progress.Batches
+	})
+	e.withInfo(func(info *TaskInfo) {
+		info.Response = map[string]interface{}{
+			"took":      0,
+			"timed_out": false,
+			"total":     total,
+			"created":   created,
+			"updated":   0,
+			"batches":   batches + 1,
+			"failures":  []interface{}{},
+		}
+	})
+}
+
+// rollbackReindex 取消后清理已写入目标索引的 doc.
+// 反向顺序 Delete(store + engine), 与正向写入顺序相反, 避免依赖 doc 之间的任何关系.
+// 回滚期间的 delete 失败不回写到 Progress.Failures(那是 reindex 自身的失败计数,
+// 不能把清理阶段的失败混进 reindex 失败统计里; 失败信息写 stderr, 由运维查日志).
+func (s *Server) rollbackReindex(dest string, written []string) {
+	for i := len(written) - 1; i >= 0; i-- {
+		id := written[i]
+		if err := s.store.Delete(storage.DocKey(dest, id)); err != nil {
+			fmt.Fprintf(os.Stderr, "[reindex-rollback] store.Delete(%s/%s) failed: %v\n", dest, id, err)
+		}
+		s.engine.DeleteDoc(dest, id)
 	}
 }
 

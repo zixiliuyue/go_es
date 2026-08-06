@@ -64,12 +64,15 @@ type TaskManager struct {
 	nextID uint64
 }
 
-// taskEntry 任务内部状态
+// taskEntry 任务内部状态.
+// info 字段由 runner goroutine 写入, snapshot()/Get() 读出, 二者并发, 需要 mu 保护.
+// cancelled / cancel / done 字段并发安全(cancelled 用 atomic.Bool; cancel/done 是只写一次).
 type taskEntry struct {
-	info    TaskInfo
-	cancel  chan struct{}
+	mu       sync.Mutex // 保护 info 字段; cancelled/done 已有自己的并发机制
+	info     TaskInfo
+	cancel   chan struct{}
 	cancelled atomic.Bool
-	done    chan struct{}
+	done     chan struct{}
 }
 
 var globalTaskManager = &TaskManager{tasks: make(map[string]*taskEntry)}
@@ -146,11 +149,22 @@ func (m *TaskManager) Cancel(id string) bool {
 	return true
 }
 
-// snapshot 拷贝当前任务信息
+// snapshot 拷贝当前任务信息(线程安全).
+// 在读 info 期间持有 mu 短锁, 保证与 runner 写入不并发.
 func (e *taskEntry) snapshot() TaskInfo {
+	e.mu.Lock()
 	info := e.info
+	e.mu.Unlock()
 	info.RunningTimeInNanos = time.Since(parseStartTime(info.StartTime)).Nanoseconds()
 	return info
+}
+
+// withInfo 在持锁状态下执行 fn, 拿到 *TaskInfo 直接操作.
+// 用于 runner goroutine 写入 info 字段.
+func (e *taskEntry) withInfo(fn func(info *TaskInfo)) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	fn(&e.info)
 }
 
 func parseStartTime(s string) time.Time {
