@@ -1,0 +1,53 @@
+# mTLS 容器化集成测试编排
+# 与 docker-compose.tls.test.yml(单向 TLS) 隔离, 独立 project 名 + host 端口
+# 启动一个自研 server, 启用 TLS + mTLS(require_verify)
+# 端口映射到 19203
+
+services:
+  go_es_server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    container_name: ${PROJ:-go_es_mtls_test}_go_es
+    command:
+      - "-addr=:9200"
+      - "-data=/data"
+      - "-tls.cert=/certs/server.crt"
+      - "-tls.key=/certs/server.key"
+      - "-tls.enable-http2=true"
+      - "-tls.client-ca=/certs/ca.crt"
+      - "-tls.client-auth=require_verify"
+    environment:
+      - ES_ADDR=:9200
+      - ES_DATA=/data
+    volumes:
+      - go_es_data:/data
+      - ${MTLS_CERT_DIR}:/certs:ro
+    ports:
+      - "${HOST_GO_ES_MTLS_PORT:-19203}:9200"
+    # 不使用 docker healthcheck: mTLS 模式下 healthcheck 命令必须带 client cert,
+    # 而 server 端 mTLS 校验是全局的, 让 healthcheck 用 wget/curl 跳过验证就破坏 mTLS 设计.
+    # 改由 scripts/test-mtls-in-docker.sh 主机侧 curl + cert 等待就绪.
+    networks: [mtlsnet]
+
+  tester:
+    image: alpine:3.19
+    container_name: ${PROJ:-go_es_mtls_test}_tester
+    # 不依赖 healthcheck: 上面已经禁用了. 主机侧 curl 等待就绪后再 run tester.
+    environment:
+      - GO_ES_MTLS_URL=https://go_es_server:9200
+    volumes:
+      - ./scripts/e2e-mtls-tests.sh:/e2e-mtls-tests.sh:ro
+      # client cert/key + CA 也 mount 进来, 让 tester 能 curl --cert/--key
+      - ${MTLS_CERT_DIR}/client.crt:/certs/client.crt:ro
+      - ${MTLS_CERT_DIR}/client.key:/certs/client.key:ro
+      - ${MTLS_CERT_DIR}/ca.crt:/certs/ca.crt:ro
+    entrypoint: ["sh", "/e2e-mtls-tests.sh"]
+    networks: [mtlsnet]
+
+networks:
+  mtlsnet:
+    driver: bridge
+
+volumes:
+  go_es_data:

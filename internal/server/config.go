@@ -33,9 +33,71 @@ type ConfigFile struct {
 	Data  string         `yaml:"data"`
 	Auth  AuthConfig     `yaml:"auth"`
 	Limit LimitConfig    `yaml:"limit"`
+	TLS   TLSConfig      `yaml:"tls"`
 	Log   string         `yaml:"log_level"`
 	Watch time.Duration  `yaml:"watch_interval"`
 	Extra map[string]any `yaml:"extra,omitempty"`
+}
+
+// TLSConfig TLS 监听配置.
+// 证书路径只在启动时生效(和 addr/data 一样), 修改需重启.
+//
+// mTLS(mTLS) 模式: 同时配置 CertFile/KeyFile/ClientCAFile 时启用.
+// ClientAuth 控制对客户端证书的强制级别:
+//   - "none"           : 不要求, 标准 TLS(默认)
+//   - "request"        : 握手时请求, 但不强制/不验证(降级兼容)
+//   - "require_any"    : 强制要求, 但不验证证书链
+//   - "require_verify" : 强制要求 且 验证证书链(生产用, 默认 mTLS 推荐)
+type TLSConfig struct {
+	// CertFile PEM 编码的证书链路径
+	CertFile string `yaml:"cert"`
+	// KeyFile PEM 编码的私钥路径
+	KeyFile string `yaml:"key"`
+	// EnableHTTP2 true 时在 TLS 上协商 h2(默认 true, 需要 -tls.cert/-tls.key 同时设置)
+	// 用指针以便区分 "未设置" 与 "显式 false"
+	EnableHTTP2 *bool `yaml:"enable_http2,omitempty"`
+	// ClientCAFile PEM 编码的 CA 池, 用于校验客户端证书(mTLS 用).
+	// 路径只在启动时生效.
+	ClientCAFile string `yaml:"client_ca,omitempty"`
+	// ClientAuth 客户端证书强制级别, 枚举: none/request/require_any/require_verify.
+	// 用指针区分 "未设置(= none)" 与 "显式设置"; 默认 mTLS 推荐 require_verify.
+	ClientAuth *string `yaml:"client_auth,omitempty"`
+}
+
+// ClientAuthKind 客户端证书强制级别枚举
+type ClientAuthKind string
+
+const (
+	ClientAuthNone          ClientAuthKind = "none"
+	ClientAuthRequest       ClientAuthKind = "request"
+	ClientAuthRequireAny    ClientAuthKind = "require_any"
+	ClientAuthRequireVerify ClientAuthKind = "require_verify"
+)
+
+// AuthKind 返回 client_auth 字段的枚举值, 缺省 none.
+func (t TLSConfig) AuthKind() ClientAuthKind {
+	if t.ClientAuth == nil {
+		return ClientAuthNone
+	}
+	return ClientAuthKind(*t.ClientAuth)
+}
+
+// Enabled 当 cert+key 都配置时启用 TLS
+func (t TLSConfig) Enabled() bool {
+	return t.CertFile != "" && t.KeyFile != ""
+}
+
+// MTLSEnabled mTLS 模式: cert+key+client_ca 全部配置 且 auth != none
+func (t TLSConfig) MTLSEnabled() bool {
+	return t.Enabled() && t.ClientCAFile != "" && t.AuthKind() != ClientAuthNone
+}
+
+// H2Enabled 返回 h2 是否启用, 默认为 true
+func (t TLSConfig) H2Enabled() bool {
+	if t.EnableHTTP2 == nil {
+		return true
+	}
+	return *t.EnableHTTP2
 }
 
 // DefaultWatchInterval 默认轮询间隔
@@ -58,6 +120,8 @@ func NewConfigLoader(path string) *ConfigLoader {
 }
 
 // Load 同步加载一次, 解析到 current
+// 解析流程: read -> yaml.Unmarshal -> schema.Validate -> 提交 current
+// 任何一步失败都返回错误, cmd/server/main.go 的 log.Fatalf 统一处理
 func (l *ConfigLoader) Load() error {
 	if l.path == "" {
 		return nil
@@ -69,6 +133,15 @@ func (l *ConfigLoader) Load() error {
 	var cfg ConfigFile
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return fmt.Errorf("parse config: %w", err)
+	}
+	// Schema 校验: 在 unmarshal 之后, 提交 current 之前.
+	// 校验失败 = 启动期报错(与 parse 错误同级别), 不修改 current.
+	if verrs := DefaultConfigSchema().Validate(&cfg); len(verrs) > 0 {
+		return fmt.Errorf("validate config: %w", verrs)
+	}
+	// 附加健全性检查(端口号范围)
+	if err := SanityCheck(&cfg); err != nil {
+		return fmt.Errorf("validate config: %w", err)
 	}
 	if cfg.Watch == 0 {
 		cfg.Watch = DefaultWatchInterval
