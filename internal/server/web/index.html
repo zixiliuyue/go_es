@@ -7,46 +7,114 @@
   <style>
     * { box-sizing: border-box; }
     body { font: 14px/1.5 -apple-system, system-ui, sans-serif; margin: 0; background: #0f1115; color: #e6e6e6; }
-    header { padding: 12px 20px; background: #1a1d24; border-bottom: 1px solid #2a2e36; display: flex; align-items: center; gap: 16px; }
+    header { padding: 12px 20px; background: #1a1d24; border-bottom: 1px solid #2a2e36; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
     header h1 { margin: 0; font-size: 16px; color: #79c0ff; }
     header .badge { font-size: 11px; padding: 2px 6px; background: #2a2e36; border-radius: 3px; color: #8b949e; }
     header a { color: #79c0ff; text-decoration: none; }
-    main { display: grid; grid-template-columns: 240px 1fr; height: calc(100vh - 50px); }
+    header .spacer { flex: 1; }
+    /* Tab 栏 */
+    .tabbar { display: flex; align-items: stretch; background: #16181d; border-bottom: 1px solid #2a2e36; overflow-x: auto; scrollbar-width: thin; }
+    .tab { display: inline-flex; align-items: center; gap: 6px; padding: 8px 12px; min-width: 120px; max-width: 240px; cursor: pointer; color: #8b949e; border-right: 1px solid #2a2e36; user-select: none; transition: background 0.15s, color 0.15s; position: relative; }
+    .tab:hover { background: #1f242c; color: #c9d1d9; }
+    .tab.active { color: #e6e6e6; background: #0f1115; }
+    .tab.active::after { content: ''; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; background: #1f6feb; transition: left 0.15s; }
+    .tab .title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+    .tab .title[contenteditable="true"] { outline: 1px solid #1f6feb; background: #0d1117; padding: 1px 4px; border-radius: 2px; }
+    .tab .close { font-size: 14px; line-height: 1; color: #6e7681; padding: 0 4px; border-radius: 2px; }
+    .tab .close:hover { background: #f85149; color: white; }
+    .tab.dirty .title::before { content: '●'; color: #d29922; margin-right: 4px; font-size: 10px; }
+    .tabnew { padding: 8px 14px; cursor: pointer; color: #6e7681; background: #1a1d24; border: 0; border-right: 1px solid #2a2e36; }
+    .tabnew:hover { background: #1f6feb; color: white; }
+    /* 主体 */
+    main { display: grid; grid-template-columns: 240px 1fr; height: calc(100vh - 50px - 39px); }
+    @media (max-width: 900px) { main { grid-template-columns: 1fr; } aside { display: none; } }
     aside { background: #16181d; border-right: 1px solid #2a2e36; overflow-y: auto; }
     aside h2 { font-size: 11px; text-transform: uppercase; color: #6e7681; padding: 12px 16px 4px; margin: 0; }
     .idx { display: block; padding: 6px 16px; cursor: pointer; color: #c9d1d9; text-decoration: none; }
     .idx:hover { background: #1f242c; }
     .idx.active { background: #1f6feb; color: white; }
-    .content { padding: 20px; overflow-y: auto; }
+    .content { padding: 20px; overflow-y: auto; animation: fadein 0.15s ease; }
+    @keyframes fadein { from { opacity: 0; transform: translateY(2px); } to { opacity: 1; transform: none; } }
     .panel { background: #16181d; border: 1px solid #2a2e36; border-radius: 6px; margin-bottom: 16px; }
-    .panel h3 { margin: 0; padding: 10px 14px; font-size: 12px; text-transform: uppercase; color: #8b949e; border-bottom: 1px solid #2a2e36; }
+    .panel h3 { margin: 0; padding: 10px 14px; font-size: 12px; text-transform: uppercase; color: #8b949e; border-bottom: 1px solid #2a2e36; display: flex; align-items: center; gap: 8px; }
     .panel pre { margin: 0; padding: 12px 14px; max-height: 320px; overflow: auto; font-size: 12px; color: #c9d1d9; white-space: pre-wrap; word-break: break-all; }
     .row { display: flex; gap: 8px; padding: 12px 14px; align-items: center; flex-wrap: wrap; }
-    .row input, .row select { background: #0d1117; color: #e6e6e6; border: 1px solid #2a2e36; padding: 6px 8px; border-radius: 4px; font-size: 13px; }
-    .row input { flex: 1; min-width: 120px; }
-    .row button { background: #1f6feb; color: white; border: 0; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 13px; }
+    .row input, .row select, .row button { background: #0d1117; color: #e6e6e6; border: 1px solid #2a2e36; padding: 6px 8px; border-radius: 4px; font-size: 13px; }
+    .row input, .row select { flex: 1; min-width: 120px; }
+    .row input[type="number"] { flex: 0 0 80px; }
+    .row button { background: #1f6feb; color: white; border: 0; cursor: pointer; }
     .row button:hover { background: #388bfd; }
     .row button.secondary { background: #30363d; }
     .row button.secondary:hover { background: #484f58; }
-    .stat { display: flex; gap: 24px; padding: 12px 14px; }
+    .typebadge { font-size: 10px; padding: 1px 6px; border-radius: 3px; background: #2a2e36; color: #79c0ff; }
+    .typebadge.t-number, .typebadge.t-integer { color: #d2a8ff; }
+    .typebadge.t-boolean { color: #ffa657; }
+    .typebadge.t-date { color: #3fb950; }
+    .typebadge.t-object { color: #f85149; }
+    .stat { display: flex; gap: 24px; padding: 12px 14px; flex-wrap: wrap; }
     .stat div { text-align: center; }
     .stat b { display: block; font-size: 22px; color: #79c0ff; }
     .stat span { font-size: 11px; color: #6e7681; }
     .empty { color: #6e7681; padding: 16px; font-style: italic; }
     .err { color: #f85149; }
     .ok { color: #3fb950; }
-    /* 表格样式 (聚合结果) */
     table.agg { border-collapse: collapse; width: 100%; font-size: 12px; }
     table.agg th, table.agg td { padding: 6px 14px; text-align: left; border-bottom: 1px solid #2a2e36; }
     table.agg th { color: #8b949e; font-weight: 500; }
     table.agg tr:hover { background: #1f242c; }
     .bar { display: inline-block; background: #1f6feb; height: 12px; border-radius: 2px; vertical-align: middle; }
-    /* 分页 */
     .pager { padding: 8px 14px; display: flex; align-items: center; gap: 12px; border-top: 1px solid #2a2e36; }
     .pager button { background: #30363d; color: white; border: 0; padding: 4px 10px; border-radius: 3px; cursor: pointer; }
     .pager button:disabled { opacity: 0.4; cursor: not-allowed; }
     .pager button:hover:not(:disabled) { background: #484f58; }
     .pager span { font-size: 12px; color: #8b949e; }
+    /* 历史面板 */
+    .historypanel { position: fixed; right: 0; top: 0; bottom: 0; width: 380px; max-width: 90vw; background: #16181d; border-left: 1px solid #2a2e36; transform: translateX(100%); transition: transform 0.2s; z-index: 50; display: flex; flex-direction: column; box-shadow: -4px 0 12px rgba(0,0,0,0.4); }
+    .historypanel.open { transform: translateX(0); }
+    .historypanel header { background: #1a1d24; padding: 12px 16px; border-bottom: 1px solid #2a2e36; }
+    .historypanel .hlist { flex: 1; overflow-y: auto; padding: 8px 0; }
+    .hitem { padding: 10px 16px; border-bottom: 1px solid #2a2e36; cursor: pointer; transition: background 0.1s; }
+    .hitem:hover { background: #1f242c; }
+    .hitem .hwhen { font-size: 10px; color: #6e7681; }
+    .hitem .htype { font-size: 10px; padding: 1px 5px; border-radius: 3px; background: #2a2e36; color: #79c0ff; margin-right: 6px; }
+    .hitem .htype.t-agg { color: #d2a8ff; }
+    .hitem .hsummary { font-size: 12px; color: #c9d1d9; word-break: break-all; }
+    .hitem .hactions { font-size: 11px; margin-top: 4px; display: flex; gap: 8px; }
+    .hitem .hactions span { color: #1f6feb; }
+    .hfilter { padding: 8px 12px; border-bottom: 1px solid #2a2e36; display: flex; gap: 6px; flex-wrap: wrap; }
+    .hfilter input, .hfilter select { background: #0d1117; color: #e6e6e6; border: 1px solid #2a2e36; padding: 5px 8px; border-radius: 4px; font-size: 12px; }
+    .hfilter input { flex: 1; min-width: 120px; }
+    .hfilter button { background: #30363d; color: white; border: 0; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 11px; }
+    .hfilter button.active { background: #1f6feb; }
+    /* 字段推断可视化 */
+    .fieldchip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; margin: 2px; background: #1f242c; border-radius: 12px; font-size: 11px; cursor: pointer; }
+    .fieldchip:hover { background: #2a2e36; }
+    .fieldchip .fname { color: #c9d1d9; }
+    .fieldchip .ftype { color: #79c0ff; font-size: 10px; }
+    .fieldchip.t-number .ftype, .fieldchip.t-integer .ftype { color: #d2a8ff; }
+    .fieldchip.t-boolean .ftype { color: #ffa657; }
+    .fieldchip.t-date .ftype { color: #3fb950; }
+    .fieldchip.t-object .ftype { color: #f85149; }
+    /* 抽屉触发按钮 */
+    .iconbtn { background: transparent; border: 1px solid #2a2e36; color: #8b949e; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 12px; }
+    .iconbtn:hover { background: #1f242c; color: #e6e6e6; }
+    /* Tab 拖拽视觉 */
+    .tab[draggable="true"] { -webkit-user-drag: element; }
+    .tab.dragging { opacity: 0.4; }
+    .tab.drag-over-left::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: #1f6feb; }
+    .tab.drag-over-right::after { content: ''; position: absolute; right: 0; top: 0; bottom: 0; width: 3px; background: #1f6feb; }
+    .tab.dropzone-close { outline: 2px dashed #f85149; outline-offset: -2px; }
+    /* 导入/导出 toast */
+    .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #1f6feb; color: white; padding: 8px 16px; border-radius: 4px; font-size: 13px; box-shadow: 0 4px 12px rgba(0,0,0,0.4); z-index: 100; animation: toastIn 0.2s ease; }
+    .toast.err { background: #f85149; }
+    @keyframes toastIn { from { opacity: 0; transform: translate(-50%, 8px); } to { opacity: 1; transform: translate(-50%, 0); } }
+    /* 历史图表 */
+    .chartwrap { padding: 12px 16px; border-bottom: 1px solid #2a2e36; background: #0f1115; }
+    .chartwrap h4 { font-size: 10px; text-transform: uppercase; color: #6e7681; margin: 0 0 6px; font-weight: 500; }
+    .chartwrap svg { display: block; width: 100%; height: auto; }
+    .chartwrap .legend { display: flex; gap: 12px; font-size: 10px; color: #8b949e; margin-top: 4px; }
+    .chartwrap .legend i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 4px; vertical-align: middle; }
+    .chartwrap .empty { color: #6e7681; font-style: italic; padding: 8px 0; text-align: center; }
   </style>
 </head>
 <body>
@@ -54,10 +122,17 @@
   <h1>go_es · 控制台</h1>
   <span class="badge" id="ver">v?</span>
   <span class="badge" id="health">health?</span>
-  <span style="flex:1"></span>
+  <span class="spacer"></span>
+  <button class="iconbtn" id="historyBtn" onclick="toggleHistory()">历史 ▤</button>
+  <button class="iconbtn" id="exportBtn" title="导出所有 Tab 与历史为 JSON 文件" onclick="exportTabs()">导出 ↓</button>
+  <button class="iconbtn" id="importBtn" title="从 JSON 文件恢复 Tab 与历史" onclick="document.getElementById('importFile').click()">导入 ↑</button>
+  <input type="file" id="importFile" accept="application/json,.json" style="display:none" onchange="importTabs(event)">
   <span class="badge"><a href="/metrics">/metrics</a></span>
   <span class="badge"><a href="/_cluster/health">/_cluster/health</a></span>
 </header>
+<div class="tabbar" id="tabBar">
+  <button class="tabnew" id="newTabBtn" title="新建 Tab" onclick="newTab()">+ 新建</button>
+</div>
 <main>
   <aside>
     <h2>索引</h2>
@@ -65,59 +140,61 @@
     <h2 style="margin-top:8px">_tasks</h2>
     <div id="tasks" style="padding: 0 16px 8px; font-size: 12px;"></div>
   </aside>
-  <section class="content">
-    <div class="panel">
-      <h3>查询</h3>
-      <div class="row">
-        <input id="qField" placeholder="字段, 如 title" value="title">
-        <input id="qValue" placeholder="值, 如 hello" value="">
-        <select id="qType">
-          <option value="match">match</option>
-          <option value="term">term</option>
-          <option value="range">range</option>
-          <option value="match_all">match_all</option>
-        </select>
-        <input id="qFrom" type="number" value="0" min="0" step="10" style="flex:0 0 80px" title="from">
-        <input id="qSize" type="number" value="20" min="1" max="200" style="flex:0 0 80px" title="size">
-        <button onclick="runSearch()">搜索</button>
-        <button class="secondary" onclick="prevPage()">←</button>
-        <button class="secondary" onclick="nextPage()">→</button>
-      </div>
-      <pre id="searchResult">在左侧选索引后输入字段和值, 点搜索.</pre>
-      <div class="pager">
-        <span id="pageInfo">第 - / - 页</span>
-        <span id="totalInfo">total: -</span>
-      </div>
-    </div>
-
-    <div class="panel">
-      <h3>聚合 (按字段计数 TopN)</h3>
-      <div class="row">
-        <input id="aggField" placeholder="字段, 如 category" value="category">
-        <input id="aggSize" type="number" value="10" min="1" max="50" style="flex:0 0 80px" title="size">
-        <input id="aggQuery" placeholder="(可选) 范围筛选表达式" value="">
-        <button onclick="runAgg()">聚合</button>
-      </div>
-      <div id="aggResult" style="padding: 0 14px 12px;">在左侧选索引后输入字段, 点聚合.</div>
-    </div>
-
-    <div class="panel">
-      <h3>集群状态</h3>
-      <div class="stat" id="cluster"><div><b>-</b><span>loading</span></div></div>
-    </div>
-
-    <div class="panel" id="mappingPanel" style="display:none">
-      <h3>Mapping — <span id="curIdx"></span></h3>
-      <pre id="mappingResult"></pre>
-    </div>
+  <section class="content" id="contentArea">
+    <!-- Tab 内容由 JS 注入, 每个 Tab 一份, 隐藏非 active -->
   </section>
 </main>
+<aside class="historypanel" id="historyPanel">
+  <header style="display:flex;align-items:center;gap:8px">
+    <h3 style="margin:0;font-size:13px;color:#79c0ff">历史查询</h3>
+    <span class="spacer" style="flex:1"></span>
+    <button class="iconbtn" onclick="clearHistory()">清空</button>
+    <button class="iconbtn" onclick="toggleHistory()">×</button>
+  </header>
+  <div class="hfilter">
+    <input id="hSearch" placeholder="按内容筛选..." oninput="renderHistory()">
+    <select id="hType" onchange="renderHistory()">
+      <option value="all">全部</option>
+      <option value="search">search</option>
+      <option value="agg">agg</option>
+    </select>
+    <select id="hRange" onchange="renderHistory()">
+      <option value="all">全部时间</option>
+      <option value="1h">最近 1 小时</option>
+      <option value="1d">最近 1 天</option>
+      <option value="7d">最近 7 天</option>
+    </select>
+  </div>
+  <!-- 历史图表区: 24h 调用频次柱状图 + 类型分布圆环 -->
+  <div class="chartwrap">
+    <h4>最近 24h 调用频次</h4>
+    <div id="histChart"></div>
+    <div class="legend">
+      <span><i style="background:#1f6feb"></i>search</span>
+      <span><i style="background:#d2a8ff"></i>agg</span>
+    </div>
+  </div>
+  <div class="hlist" id="hList"></div>
+</aside>
 <script>
+  // ---------- 常量与存储 ----------
   const $ = (id) => document.getElementById(id);
-  let currentIndex = null;
-  let currentPage = 0;
+  const LS_TABS = 'go_es_tabs';
+  const LS_ACTIVE = 'go_es_active_tab';
+  const LS_HISTORY = 'go_es_history';
+  const MAX_HISTORY = 200;
   const pageSize = 20;
 
+  // ---------- 状态 ----------
+  let tabs = [];           // {id,title,index,page,form,cached,fieldMap}
+  let activeTabId = null;
+  let history = [];        // {ts,type,tabTitle,summary,params}
+  let indexCache = [];     // [{index,docs}]
+  let historyOpen = false;
+  let currentIndex = null;  // 兼容 e2e: 旧 selectIndex 用
+  let currentPage = 0;      // 兼容 e2e: 旧分页用
+
+  // ---------- HTTP ----------
   async function jget(path) {
     const r = await fetch(path, { headers: { 'Accept': 'application/json' } });
     const t = await r.text();
@@ -132,7 +209,479 @@
     });
     return { ok: r.ok, code: r.status, text: await r.text() };
   }
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
 
+  // ---------- Tab 模型 ----------
+  function newTabData(title) {
+    return {
+      id: 't_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
+      title: title || ('Tab ' + (tabs.length + 1)),
+      index: null,
+      page: 0,
+      form: { qField: '', qValue: '', qType: 'match_all', qFrom: 0, qSize: pageSize, aggField: '', aggSize: 10, aggQuery: '' },
+      cached: { search: '', searchTotal: 0, agg: '' },
+      fieldMap: {}, // field -> {type, sample}
+    };
+  }
+  function activeTab() { return tabs.find(t => t.id === activeTabId) || tabs[0]; }
+  function saveTabs() { try { localStorage.setItem(LS_TABS, JSON.stringify(tabs)); localStorage.setItem(LS_ACTIVE, activeTabId); } catch {} }
+  function loadTabs() {
+    try {
+      const raw = localStorage.getItem(LS_TABS);
+      if (raw) tabs = JSON.parse(raw);
+      const act = localStorage.getItem(LS_ACTIVE);
+      activeTabId = act || (tabs[0] && tabs[0].id) || null;
+    } catch {}
+    if (!tabs.length) {
+      tabs = [newTabData('Tab 1')];
+      activeTabId = tabs[0].id;
+    }
+    if (!activeTabId || !tabs.find(t => t.id === activeTabId)) activeTabId = tabs[0].id;
+    try { const hr = localStorage.getItem(LS_HISTORY); if (hr) history = JSON.parse(hr) || []; } catch {}
+  }
+  function newTab() {
+    const t = newTabData('Tab ' + (tabs.length + 1));
+    tabs.push(t);
+    activeTabId = t.id;
+    saveTabs();
+    renderTabs();
+    renderContent();
+  }
+  function closeTab(id) {
+    const i = tabs.findIndex(t => t.id === id);
+    if (i < 0) return;
+    if (tabs.length === 1) { // 至少保留一个, 直接重置
+      tabs[0] = newTabData('Tab 1');
+      activeTabId = tabs[0].id;
+    } else {
+      tabs.splice(i, 1);
+      if (activeTabId === id) {
+        const next = tabs[i] || tabs[i - 1];
+        activeTabId = next.id;
+      }
+    }
+    saveTabs();
+    renderTabs();
+    renderContent();
+  }
+  function switchTab(id) {
+    if (id === activeTabId) return;
+    activeTabId = id;
+    saveTabs();
+    renderTabs();
+    renderContent();
+  }
+  function renameTab(id, newTitle) {
+    const t = tabs.find(x => x.id === id);
+    if (!t) return;
+    t.title = (newTitle || '').trim() || t.title;
+    saveTabs();
+    renderTabs();
+  }
+
+  // ---------- 渲染 ----------
+  function renderTabs() {
+    const bar = $('tabBar');
+    // 保留 + 新建 按钮, 其余重建
+    const newBtn = $('newTabBtn');
+    bar.innerHTML = '';
+    bar.appendChild(newBtn);
+    tabs.forEach(t => {
+      const el = document.createElement('div');
+      el.className = 'tab' + (t.id === activeTabId ? ' active' : '');
+      el.dataset.tabId = t.id;
+      el.draggable = true;  // 启用 HTML5 拖拽
+      el.title = '拖拽排序 / 拖出 tabbar 关闭 / 双击重命名 / × 关闭';
+      el.innerHTML = '<span class="title">' + escapeHtml(t.title) + '</span><span class="close" title="关闭">×</span>';
+      el.onclick = (e) => {
+        if (e.target.classList.contains('close')) { e.stopPropagation(); closeTab(t.id); return; }
+        switchTab(t.id);
+      };
+      el.querySelector('.title').ondblclick = (e) => {
+        e.stopPropagation();
+        const span = e.currentTarget;
+        span.contentEditable = 'true';
+        span.focus();
+        // 选中全部
+        const r = document.createRange(); r.selectNodeContents(span);
+        const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
+        const finish = () => {
+          span.contentEditable = 'false';
+          span.removeEventListener('blur', finish);
+          renameTab(t.id, span.textContent);
+        };
+        span.addEventListener('blur', finish);
+        span.addEventListener('keydown', (ev) => {
+          if (ev.key === 'Enter') { ev.preventDefault(); span.blur(); }
+          if (ev.key === 'Escape') { span.textContent = t.title; span.blur(); }
+        });
+      };
+      // 拖拽事件: 源 = dragstart, 中转 = dragover/dragenter/dragleave, 落点 = drop
+      // 拖出 tabbar 关闭: 在 dragend 里检查 clientY 是否在 tabbar 之外
+      el.addEventListener('dragstart', onTabDragStart);
+      el.addEventListener('dragend', onTabDragEnd);
+      el.addEventListener('dragover', onTabDragOver);
+      el.addEventListener('dragleave', onTabDragLeave);
+      el.addEventListener('drop', onTabDrop);
+      bar.appendChild(el);
+    });
+  }
+
+  // ---------- 拖拽排序 + 拖出关闭 ----------
+  // 拖拽状态: 源 tab id + 占位指示
+  let dragSourceId = null;
+  function onTabDragStart(e) {
+    const id = e.currentTarget.dataset.tabId;
+    dragSourceId = id;
+    e.currentTarget.classList.add('dragging');
+    // 必填 dataTransfer 否则 Firefox 不触发 drop
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', id);
+  }
+  function onTabDragEnd(e) {
+    e.currentTarget.classList.remove('dragging');
+    // 清理所有 drag-over / dropzone 标记
+    document.querySelectorAll('.tab').forEach(el => el.classList.remove('drag-over-left', 'drag-over-right', 'dropzone-close'));
+    // 拖出 tabbar 关闭: 检查 clientY/Y 是否在 tabbar 矩形之外
+    // 兼容 mouse 与 touch 触发的 dragend
+    const tabbar = $('tabBar');
+    const rect = tabbar.getBoundingClientRect();
+    const x = e.clientX, y = e.clientY;
+    const insideBar = (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom);
+    if (!insideBar && dragSourceId) {
+      // 只剩一个时也允许关闭(由 closeTab 重置为新 Tab 1)
+      closeTab(dragSourceId);
+      showToast('已通过拖出关闭 Tab', false);
+    }
+    dragSourceId = null;
+  }
+  function onTabDragOver(e) {
+    if (!dragSourceId) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    // 用目标 tab 的水平中线判断插入位置(左半 = 之前, 右半 = 之后)
+    const el = e.currentTarget;
+    const rect = el.getBoundingClientRect();
+    const before = (e.clientX - rect.left) < rect.width / 2;
+    // 避免连续 dragover 叠加闪烁
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('drag-over-left', 'drag-over-right'));
+    el.classList.add(before ? 'drag-over-left' : 'drag-over-right');
+  }
+  function onTabDragLeave(e) {
+    // 只有真正离开 tab 才清除(避免子元素冒泡误清)
+    if (e.currentTarget.contains(e.relatedTarget)) return;
+    e.currentTarget.classList.remove('drag-over-left', 'drag-over-right');
+  }
+  function onTabDrop(e) {
+    if (!dragSourceId) return;
+    e.preventDefault();
+    const targetId = e.currentTarget.dataset.tabId;
+    if (targetId === dragSourceId) return;
+    const srcIdx = tabs.findIndex(t => t.id === dragSourceId);
+    if (srcIdx < 0) return;
+    const [moved] = tabs.splice(srcIdx, 1);
+    let dstIdx = tabs.findIndex(t => t.id === targetId);
+    if (dstIdx < 0) { tabs.push(moved); } else {
+      // 复用 dragover 算的 before/after
+      const rect = e.currentTarget.getBoundingClientRect();
+      const before = (e.clientX - rect.left) < rect.width / 2;
+      // splice 后 dstIdx 可能变化
+      if (srcIdx < dstIdx) dstIdx--;
+      tabs.splice(before ? dstIdx : dstIdx + 1, 0, moved);
+    }
+    saveTabs();
+    renderTabs();
+  }
+
+  // ---------- 导入 / 导出 ----------
+  // 导出格式: { version:1, exportedAt:<iso>, tabs:[...], activeTabId, history:[...] }
+  function buildExportPayload() {
+    return {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      tabs: tabs,
+      activeTabId: activeTabId,
+      history: history,
+    };
+  }
+  function exportTabs() {
+    if (!tabs.length) { showToast('没有可导出的 Tab', true); return; }
+    const data = buildExportPayload();
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'go_es_tabs_' + Date.now() + '.json';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    showToast('已导出 ' + tabs.length + ' 个 Tab + ' + history.length + ' 条历史', false);
+  }
+  function importTabs(ev) {
+    const file = ev.target.files && ev.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const data = JSON.parse(String(reader.result || ''));
+        const ok = validateImportPayload(data);
+        if (!ok) { showToast('导入失败: 文件格式不合法', true); return; }
+        const mode = (data.tabs && tabs.length) ? confirm('当前已有 ' + tabs.length + ' 个 Tab.\n\n确定 = 合并导入(追加); 取消 = 覆盖(替换现有).') : false;
+        if (mode) {
+          // 合并: 去重 id, 保留新文件
+          const existing = new Set(tabs.map(t => t.id));
+          const newTabs = (data.tabs || []).filter(t => !existing.has(t.id));
+          tabs = tabs.concat(newTabs);
+          // history 合并去重
+          const histSet = new Set(history.map(h => h.ts + '|' + h.summary));
+          const newHist = (data.history || []).filter(h => !histSet.has(h.ts + '|' + h.summary));
+          history = history.concat(newHist).slice(0, MAX_HISTORY);
+          if (data.activeTabId && tabs.find(t => t.id === data.activeTabId)) activeTabId = data.activeTabId;
+          showToast('合并导入: +' + newTabs.length + ' Tab / +' + newHist.length + ' 历史', false);
+        } else {
+          // 覆盖
+          tabs = data.tabs || [];
+          if (tabs.length === 0) tabs = [newTabData('Tab 1')];
+          activeTabId = (data.activeTabId && tabs.find(t => t.id === data.activeTabId)) ? data.activeTabId : tabs[0].id;
+          history = (data.history || []).slice(0, MAX_HISTORY);
+          showToast('已覆盖导入: ' + tabs.length + ' Tab / ' + history.length + ' 历史', false);
+        }
+        saveTabs();
+        renderTabs();
+        renderContent();
+        renderHistory();
+        renderHistoryChart();
+      } catch (err) {
+        showToast('导入失败: ' + err.message, true);
+      } finally {
+        ev.target.value = '';  // 允许同一文件再次选择
+      }
+    };
+    reader.onerror = () => { showToast('文件读取失败', true); ev.target.value = ''; };
+    reader.readAsText(file);
+  }
+  // 校验 payload 形状, 防 XSS/误导入坏数据
+  function validateImportPayload(d) {
+    if (!d || typeof d !== 'object') return false;
+    if (d.version !== 1) return false;
+    if (!Array.isArray(d.tabs)) return false;
+    for (const t of d.tabs) {
+      if (!t || typeof t !== 'object') return false;
+      if (typeof t.id !== 'string' || typeof t.title !== 'string') return false;
+    }
+    if (d.history && !Array.isArray(d.history)) return false;
+    if (d.activeTabId && typeof d.activeTabId !== 'string') return false;
+    return true;
+  }
+  // 简易 toast
+  function showToast(msg, isErr) {
+    const el = document.createElement('div');
+    el.className = 'toast' + (isErr ? ' err' : '');
+    el.textContent = msg;
+    document.body.appendChild(el);
+    setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity 0.2s'; }, 1800);
+    setTimeout(() => { if (el.parentNode) el.parentNode.removeChild(el); }, 2100);
+  }
+
+  // 渲染当前 Tab 的内容
+  function renderContent() {
+    const area = $('contentArea');
+    const t = activeTab();
+    if (!t) { area.innerHTML = ''; return; }
+    currentIndex = t.index;
+    currentPage = t.page;
+    area.innerHTML = buildTabHTML(t);
+    bindTabEvents(t);
+    // 复原缓存结果
+    const sr = $('searchResult');
+    if (sr && t.cached.search) sr.textContent = t.cached.search;
+    const ar = $('aggResult');
+    if (ar && t.cached.agg) ar.innerHTML = t.cached.agg;
+    if (t.index) {
+      // 标记侧边栏 active
+      document.querySelectorAll('.idx').forEach(el => el.classList.toggle('active', el.textContent.startsWith(t.index)));
+    }
+    // 同步 from/size 显示
+    if (t.cached.search) {
+      $('pageInfo').textContent = '第 ' + (t.page + 1) + ' 页 (from=' + t.form.qFrom + ')';
+      $('totalInfo').textContent = 'total: ' + t.cached.searchTotal;
+    }
+  }
+  function buildTabHTML(t) {
+    const allTypes = ['match','term','range','match_all'];
+    const opts = allTypes.map(v => `<option value="${v}" ${t.form.qType === v ? 'selected' : ''}>${v}</option>`).join('');
+    const curFieldType = (t.form.qField && t.fieldMap[t.form.qField] && t.fieldMap[t.form.qField].type) || '';
+    const valCtrl = valueControlHTML(t.form.qType, curFieldType, t.form.qValue);
+    return `
+    <div class="panel">
+      <h3>查询 <span class="badge" style="font-size:10px;background:#1f242c;color:#79c0ff">${escapeHtml(t.title)}</span></h3>
+      <div class="row">
+        <input id="qField" list="fieldList" placeholder="字段, 如 title" value="${escapeHtml(t.form.qField)}">
+        <datalist id="fieldList">${Object.keys(t.fieldMap).map(f => `<option value="${escapeHtml(f)}">`).join('')}</datalist>
+        ${valCtrl}
+        <select id="qType">${opts}</select>
+        <input id="qFrom" type="number" value="${t.form.qFrom}" min="0" step="10" title="from">
+        <input id="qSize" type="number" value="${t.form.qSize}" min="1" max="200" title="size">
+        <button id="runSearchBtn">搜索</button>
+        <button class="secondary" id="prevBtn">←</button>
+        <button class="secondary" id="nextBtn">→</button>
+      </div>
+      <pre id="searchResult">${t.cached.search || '在左侧选索引后输入字段和值, 点搜索.'}</pre>
+      <div class="pager">
+        <span id="pageInfo">第 - / - 页</span>
+        <span id="totalInfo">total: -</span>
+        <span class="spacer" style="flex:1"></span>
+        <span id="fieldTypeBadge"></span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>聚合 (按字段计数 TopN)</h3>
+      <div class="row">
+        <input id="aggField" list="aggFieldList" placeholder="字段, 如 category" value="${escapeHtml(t.form.aggField)}">
+        <datalist id="aggFieldList">${Object.keys(t.fieldMap).map(f => `<option value="${escapeHtml(f)}">`).join('')}</datalist>
+        <input id="aggSize" type="number" value="${t.form.aggSize}" min="1" max="50" title="size">
+        <input id="aggQuery" placeholder="(可选) 范围筛选表达式" value="${escapeHtml(t.form.aggQuery)}">
+        <button id="runAggBtn">聚合</button>
+      </div>
+      <div id="aggResult" style="padding: 0 14px 12px;">${t.cached.agg || '在左侧选索引后输入字段, 点聚合.'}</div>
+    </div>
+
+    <div class="panel" id="fieldPanel">
+      <h3>字段类型推断 <span class="badge" style="font-size:10px;background:#1f242c;color:#79c0ff">${t.index ? escapeHtml(t.index) : '未选索引'}</span></h3>
+      <div id="fieldChips" style="padding: 12px 14px;">${fieldChipsHTML(t)}</div>
+    </div>
+
+    <div class="panel" id="mappingPanel" style="display:${t.index ? 'block' : 'none'}">
+      <h3>Mapping — ${t.index ? escapeHtml(t.index) : ''}</h3>
+      <pre id="mappingResult"></pre>
+    </div>
+
+    <div class="panel">
+      <h3>集群状态</h3>
+      <div class="stat" id="cluster"><div><b>-</b><span>loading</span></div></div>
+    </div>
+    `;
+  }
+  function valueControlHTML(qType, ftype, val) {
+    // 不同类型 + qType 组合, 给出合适的 input
+    const v = escapeHtml(val || '');
+    if (qType === 'range') {
+      // range 始终是数字或日期(用 type=number 简化)
+      return `<input id="qValue" type="text" placeholder="数字/日期范围: 10,20" value="${v}">`;
+    }
+    if (ftype === 'boolean') {
+      const on = val === true || val === 'true';
+      return `<label style="display:inline-flex;align-items:center;gap:6px;color:#8b949e;font-size:12px"><input id="qValue" type="checkbox" ${on ? 'checked' : ''}> 布尔</label>`;
+    }
+    if (ftype === 'date') {
+      return `<input id="qValue" type="date" value="${v}">`;
+    }
+    if (ftype === 'integer' || ftype === 'long' || ftype === 'short' || ftype === 'byte') {
+      return `<input id="qValue" type="number" step="1" value="${v}">`;
+    }
+    if (ftype === 'number' || ftype === 'double' || ftype === 'float') {
+      return `<input id="qValue" type="number" step="any" value="${v}">`;
+    }
+    return `<input id="qValue" type="text" placeholder="值" value="${v}">`;
+  }
+  function fieldChipsHTML(t) {
+    const keys = Object.keys(t.fieldMap);
+    if (!keys.length) return '<div class="empty">未选索引或索引无字段</div>';
+    return keys.map(f => {
+      const ft = t.fieldMap[f].type || 'string';
+      return `<span class="fieldchip t-${ft}" data-field="${escapeHtml(f)}" onclick="fillFieldFromChip('${escapeHtml(f)}')"><span class="fname">${escapeHtml(f)}</span><span class="ftype">${ft}</span></span>`;
+    }).join('');
+  }
+  function fillFieldFromChip(name) {
+    const t = activeTab();
+    t.form.qField = name;
+    saveTabs();
+    renderContent();
+  }
+  function bindTabEvents(t) {
+    const fld = $('qField'), val = $('qValue'), typ = $('qType');
+    const from = $('qFrom'), size = $('qSize');
+    const aFld = $('aggField'), aSize = $('aggSize'), aQ = $('aggQuery');
+    // 类型变化时 qType 变化 -> 重新渲染 value 控件
+    function onFormChange() {
+      t.form.qField = fld.value; t.form.qValue = readVal(val); t.form.qType = typ.value;
+      t.form.qFrom = Number(from.value) || 0; t.form.qSize = Number(size.value) || pageSize;
+      t.form.aggField = aFld.value; t.form.aggSize = Number(aSize.value) || 10; t.form.aggQuery = aQ.value;
+      saveTabs();
+      // type badge
+      const ft = (t.form.qField && t.fieldMap[t.form.qField] && t.fieldMap[t.form.qField].type) || '';
+      const badge = $('fieldTypeBadge');
+      if (badge) badge.innerHTML = ft ? `<span class="typebadge t-${ft}">${ft}</span>` : '';
+    }
+    [fld, from, size, aFld, aSize, aQ].forEach(el => el && el.addEventListener('input', onFormChange));
+    typ.addEventListener('change', () => { onFormChange(); renderContent(); });
+    // 字段变化重渲染 value 控件(以匹配新类型)
+    fld.addEventListener('change', () => { onFormChange(); renderContent(); });
+    // value 控件(checkbox 是 boolean)
+    val && val.addEventListener('input', onFormChange);
+    val && val.addEventListener('change', onFormChange);
+    $('runSearchBtn').onclick = runSearch;
+    $('runAggBtn').onclick = runAgg;
+    $('prevBtn').onclick = prevPage;
+    $('nextBtn').onclick = nextPage;
+    // 拉 mapping
+    if (t.index) loadMapping(t);
+  }
+  function readVal(el) {
+    if (!el) return '';
+    if (el.type === 'checkbox') return el.checked;
+    return el.value;
+  }
+  async function loadMapping(t) {
+    const r = await jget('/' + encodeURIComponent(t.index) + '/_mapping');
+    if (r.ok && r.json) {
+      const mp = $('mappingResult');
+      if (mp) mp.textContent = JSON.stringify(r.json, null, 2);
+      t.fieldMap = extractFieldMap(r.json, t.index);
+    }
+    // 再拉一条 doc 用于抽样
+    const s = await jget('/' + encodeURIComponent(t.index) + '/_search?size=1');
+    if (s.ok && s.json && Array.isArray(s.json.hits?.hits) && s.json.hits.hits.length) {
+      const src = s.json.hits.hits[0]._source || {};
+      for (const k of Object.keys(src)) {
+        if (!t.fieldMap[k]) t.fieldMap[k] = { type: inferType(src[k]), sample: src[k] };
+      }
+    }
+    saveTabs();
+    renderContent();
+  }
+  function extractFieldMap(json, idxName) {
+    // ES _mapping 形如 {idx: {mappings: {properties: {field: {type: ...}}}}}
+    const out = {};
+    try {
+      const m = (json[idxName] && json[idxName].mappings) || (json.mappings) || {};
+      const props = m.properties || {};
+      for (const k of Object.keys(props)) {
+        const v = props[k];
+        if (v && v.type) out[k] = { type: v.type, sample: null };
+        else if (v && v.properties) out[k] = { type: 'object', sample: null };
+      }
+    } catch {}
+    return out;
+  }
+  function inferType(v) {
+    if (v === null || v === undefined) return 'null';
+    if (typeof v === 'boolean') return 'boolean';
+    if (typeof v === 'number') return Number.isInteger(v) ? 'integer' : 'number';
+    if (typeof v === 'string') {
+      // 简单日期识别
+      if (/^\d{4}-\d{2}-\d{2}/.test(v)) return 'date';
+      return 'string';
+    }
+    if (Array.isArray(v)) return 'object';
+    return 'object';
+  }
+
+  // ---------- 索引侧边栏 ----------
   async function loadHeader() {
     const r = await jget('/');
     if (r.ok && r.json) $('ver').textContent = r.json.version?.number || 'v?';
@@ -140,131 +689,243 @@
     $('health').textContent = h.ok ? 'ready' : 'down';
     $('health').style.color = h.ok ? '#3fb950' : '#f85149';
   }
-
   async function loadIndices() {
     const r = await jget('/_cat/indices');
+    indexCache = (r.ok && Array.isArray(r.json)) ? r.json : [];
     const list = $('indices');
-    if (!r.ok || !Array.isArray(r.json) || r.json.length === 0) {
-      list.innerHTML = '<div class="empty">无索引</div>';
-      return;
-    }
+    if (!indexCache.length) { list.innerHTML = '<div class="empty">无索引</div>'; return; }
     list.innerHTML = '';
-    r.json.forEach(idx => {
+    indexCache.forEach(idx => {
       const a = document.createElement('a');
-      a.className = 'idx';
+      a.className = 'idx' + (activeTab()?.index === idx.index ? ' active' : '');
       a.textContent = idx.index + ' (' + (idx['docs.count'] || 0) + ')';
       a.onclick = (e) => { e.preventDefault(); selectIndex(idx.index); };
       list.appendChild(a);
     });
   }
-
+  // 旧 e2e 钩子: 接受 index 名
   async function selectIndex(name) {
-    currentIndex = name;
-    currentPage = 0;
+    const t = activeTab();
+    if (!t) return;
+    t.index = name;
+    t.page = 0;
+    saveTabs();
     document.querySelectorAll('.idx').forEach(el => el.classList.toggle('active', el.textContent.startsWith(name)));
-    $('curIdx').textContent = name;
-    $('mappingPanel').style.display = 'block';
-    const r = await jget('/' + encodeURIComponent(name) + '/_mapping');
-    $('mappingResult').textContent = r.ok ? JSON.stringify(r.json, null, 2) : ('ERR ' + r.code + ' ' + r.raw);
+    renderContent();
   }
 
-  function buildQuery() {
-    const f = $('qField').value.trim();
-    const v = $('qValue').value.trim();
-    const t = $('qType').value;
-    if (t === 'match_all') return { match_all: {} };
-    if (t === 'range') {
-      // v 形如 "10,20" -> gte=10 lte=20
-      const parts = v.split(',').map(s => s.trim());
+  // ---------- 查询构建 ----------
+  function buildQuery(t) {
+    const f = t.form.qField, v = t.form.qValue, typ = t.form.qType;
+    if (typ === 'match_all') return { match_all: {} };
+    if (typ === 'range') {
+      const parts = String(v || '').split(',').map(s => s.trim());
       const rng = {};
       if (parts[0]) rng.gte = isNaN(parts[0]) ? parts[0] : Number(parts[0]);
       if (parts[1]) rng.lte = isNaN(parts[1]) ? parts[1] : Number(parts[1]);
       return { range: { [f]: rng } };
     }
-    if (t === 'term') {
-      // 自动判断数字
+    if (typ === 'term') {
       const n = isNaN(v) ? v : Number(v);
       return { term: { [f]: n } };
     }
-    // match
     return { match: { [f]: v } };
   }
 
+  // ---------- 搜索 / 聚合 ----------
   async function runSearch() {
-    if (!currentIndex) { alert('先选一个索引'); return; }
-    const f = $('qField').value.trim();
-    const t = $('qType').value;
-    if (t !== 'match_all' && !f) { alert('字段必填'); return; }
-    const v = $('qValue').value.trim();
-    if (t !== 'match_all' && t !== 'range' && !v) { alert('值必填'); return; }
-    const from = Number($('qFrom').value) || 0;
-    const size = Number($('qSize').value) || 20;
-    const body = { query: buildQuery(), from, size };
-    const r = await jpost('/' + encodeURIComponent(currentIndex) + '/_search', body);
-    let parsed;
-    try { parsed = JSON.parse(r.text); } catch { parsed = null; }
+    const t = activeTab();
+    if (!t || !t.index) { alert('先选一个索引'); return; }
+    const { qField: f, qValue: v, qType: typ, qFrom: from, qSize: size } = t.form;
+    if (typ !== 'match_all' && !f) { alert('字段必填'); return; }
+    if (typ !== 'match_all' && typ !== 'range' && (v === '' || v === null || v === undefined)) { alert('值必填'); return; }
+    const body = { query: buildQuery(t), from, size };
+    const r = await jpost('/' + encodeURIComponent(t.index) + '/_search', body);
+    let parsed; try { parsed = JSON.parse(r.text); } catch { parsed = null; }
     if (parsed && parsed.hits) {
       const total = parsed.hits.total?.value ?? 0;
-      $('searchResult').textContent = JSON.stringify(parsed, null, 2);
-      $('pageInfo').textContent = '第 ' + (currentPage + 1) + ' 页 (from=' + from + ')';
+      const text = JSON.stringify(parsed, null, 2);
+      $('searchResult').textContent = text;
+      $('pageInfo').textContent = '第 ' + (t.page + 1) + ' 页 (from=' + from + ')';
       $('totalInfo').textContent = 'total: ' + total;
+      t.cached.search = text; t.cached.searchTotal = total;
+      saveTabs();
+      pushHistory({ ts: Date.now(), type: 'search', tabTitle: t.title, summary: `${t.index} | ${typ} ${f}=${v} (from=${from})`, params: { kind: 'search', index: t.index, qField: f, qValue: v, qType: typ, qFrom: from, qSize: size } });
     } else {
       $('searchResult').textContent = 'ERR ' + r.code + ' ' + r.text;
     }
   }
-
   function prevPage() {
-    if (!currentIndex) return;
-    const size = Number($('qSize').value) || 20;
-    if (currentPage > 0) {
-      currentPage--;
-      $('qFrom').value = currentPage * size;
-      runSearch();
-    }
+    const t = activeTab(); if (!t) return;
+    if (t.page > 0) { t.page--; t.form.qFrom = t.page * t.form.qSize; saveTabs(); runSearch(); }
   }
   function nextPage() {
-    if (!currentIndex) return;
-    const size = Number($('qSize').value) || 20;
-    currentPage++;
-    $('qFrom').value = currentPage * size;
-    runSearch();
+    const t = activeTab(); if (!t) return;
+    t.page++; t.form.qFrom = t.page * t.form.qSize; saveTabs(); runSearch();
   }
-
   async function runAgg() {
-    if (!currentIndex) { alert('先选一个索引'); return; }
-    const f = $('aggField').value.trim();
+    const t = activeTab();
+    if (!t || !t.index) { alert('先选一个索引'); return; }
+    const { aggField: f, aggSize: size, aggQuery: filterText } = t.form;
     if (!f) { alert('字段必填'); return; }
-    const size = Number($('aggSize').value) || 10;
-    const filterText = $('aggQuery').value.trim();
     let query = { match_all: {} };
-    if (filterText) {
-      try { query = JSON.parse(filterText); } catch { alert('范围筛选表达式不是合法 JSON'); return; }
-    }
+    if (filterText) { try { query = JSON.parse(filterText); } catch { alert('范围筛选表达式不是合法 JSON'); return; } }
     const body = { size: 0, query, aggs: { g: { terms: { field: f, size } } } };
-    const r = await jpost('/' + encodeURIComponent(currentIndex) + '/_search', body);
-    let parsed;
-    try { parsed = JSON.parse(r.text); } catch { parsed = null; }
+    const r = await jpost('/' + encodeURIComponent(t.index) + '/_search', body);
+    let parsed; try { parsed = JSON.parse(r.text); } catch { parsed = null; }
     if (parsed && parsed.aggregations && parsed.aggregations.g) {
       const buckets = parsed.aggregations.g.buckets || [];
       if (buckets.length === 0) {
-        $('aggResult').innerHTML = '<div class="empty">无聚合结果 (字段可能没数据或不可用)</div>';
+        const html = '<div class="empty">无聚合结果 (字段可能没数据或不可用)</div>';
+        $('aggResult').innerHTML = html; t.cached.agg = html; saveTabs();
         return;
       }
       const max = Math.max(...buckets.map(b => b.doc_count));
       const rows = buckets.map(b => {
         const pct = max > 0 ? (b.doc_count / max) * 100 : 0;
-        return '<tr><td>' + escapeHtml(String(b.key)) + '</td><td>' + b.doc_count + '</td><td><span class="bar" style="width:' + pct.toFixed(1) + '%"></span></td></tr>';
+        const isNum = typeof b.key === 'number';
+        const cls = isNum ? 't-number' : 'string';
+        return '<tr><td><span class="typebadge ' + cls + '">' + escapeHtml(String(b.key)) + '</span></td><td>' + b.doc_count + '</td><td><span class="bar" style="width:' + pct.toFixed(1) + '%"></span></td></tr>';
       }).join('');
-      $('aggResult').innerHTML = '<table class="agg"><thead><tr><th>key</th><th>count</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>';
+      const html = '<table class="agg"><thead><tr><th>key</th><th>count</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>';
+      $('aggResult').innerHTML = html; t.cached.agg = html; saveTabs();
+      pushHistory({ ts: Date.now(), type: 'agg', tabTitle: t.title, summary: `${t.index} | terms ${f} (size=${size})`, params: { kind: 'agg', index: t.index, aggField: f, aggSize: size, aggQuery: filterText } });
     } else {
-      $('aggResult').innerHTML = '<div class="err">ERR ' + r.code + ' ' + (parsed ? JSON.stringify(parsed) : r.text) + '</div>';
+      const html = '<div class="err">ERR ' + r.code + ' ' + (parsed ? JSON.stringify(parsed) : r.text) + '</div>';
+      $('aggResult').innerHTML = html;
     }
   }
 
-  function escapeHtml(s) {
-    return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  // ---------- 历史 ----------
+  // 历史图表: 24h 柱状图(按小时分桶统计 search/agg 调用频次)
+  // 纯 SVG, 无依赖; 输入: history[], 输出: 注入到 #histChart
+  function renderHistoryChart() {
+    const host = $('histChart');
+    if (!host) return;
+    if (!Array.isArray(history) || history.length === 0) {
+      host.innerHTML = '<div class="empty">暂无数据</div>';
+      return;
+    }
+    // 桶: 最近 24h, 每小时 1 桶, 索引 [0..23] = oldest..newest
+    const now = Date.now();
+    const HOUR = 3600e3;
+    const buckets = Array.from({ length: 24 }, () => ({ s: 0, a: 0 }));
+    for (const h of history) {
+      if (typeof h.ts !== 'number') continue;
+      const age = now - h.ts;
+      if (age < 0 || age > 24 * HOUR) continue;  // 超过 24h 跳过(忽略时钟回拨)
+      const idx = 23 - Math.floor(age / HOUR);   // 0 = 最老, 23 = 当前
+      if (h.type === 'search') buckets[idx].s++;
+      else if (h.type === 'agg') buckets[idx].a++;
+    }
+    const max = Math.max(1, ...buckets.map(b => Math.max(b.s, b.a)));
+    // SVG 尺寸
+    const W = 320, H = 90, PAD_L = 18, PAD_R = 4, PAD_T = 4, PAD_B = 14;
+    const innerW = W - PAD_L - PAD_R;
+    const innerH = H - PAD_T - PAD_B;
+    const groupW = innerW / 24;
+    const barW = Math.max(1, (groupW - 1) / 2);
+    let svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" xmlns="http://www.w3.org/2000/svg">';
+    // y 轴基线
+    svg += '<line x1="' + PAD_L + '" y1="' + (PAD_T + innerH) + '" x2="' + (W - PAD_R) + '" y2="' + (PAD_T + innerH) + '" stroke="#2a2e36" stroke-width="0.5"/>';
+    // 柱
+    buckets.forEach((b, i) => {
+      const x0 = PAD_L + i * groupW;
+      // search (蓝)
+      if (b.s > 0) {
+        const bh = (b.s / max) * innerH;
+        const x = x0, y = PAD_T + innerH - bh;
+        svg += '<rect x="' + x.toFixed(2) + '" y="' + y.toFixed(2) + '" width="' + barW.toFixed(2) + '" height="' + bh.toFixed(2) + '" fill="#1f6feb" rx="0.5"><title>' + (24 - i) + 'h前 search=' + b.s + '</title></rect>';
+      }
+      // agg (紫)
+      if (b.a > 0) {
+        const bh = (b.a / max) * innerH;
+        const x = x0 + barW + 1;
+        const y = PAD_T + innerH - bh;
+        svg += '<rect x="' + x.toFixed(2) + '" y="' + y.toFixed(2) + '" width="' + barW.toFixed(2) + '" height="' + bh.toFixed(2) + '" fill="#d2a8ff" rx="0.5"><title>' + (24 - i) + 'h前 agg=' + b.a + '</title></rect>';
+      }
+    });
+    // x 轴标签: 4 个, 标识 -24h / -16h / -8h / now
+    const labelYs = PAD_T + innerH + 10;
+    [-24, -16, -8, 0].forEach(off => {
+      const i = off === 0 ? 23 : 23 - Math.abs(off);
+      const x = PAD_L + (i + 0.5) * groupW;
+      const txt = off === 0 ? 'now' : (off + 'h');
+      svg += '<text x="' + x.toFixed(2) + '" y="' + labelYs + '" font-size="8" fill="#6e7681" text-anchor="middle">' + txt + '</text>';
+    });
+    // y 轴标签: max
+    svg += '<text x="2" y="' + (PAD_T + 6) + '" font-size="8" fill="#6e7681">' + max + '</text>';
+    svg += '<text x="2" y="' + (PAD_T + innerH) + '" font-size="8" fill="#6e7681">0</text>';
+    svg += '</svg>';
+    // 类型分布副标题(基于 total, 不是 24h 内)
+    const totalS = history.filter(h => h.type === 'search').length;
+    const totalA = history.filter(h => h.type === 'agg').length;
+    const total = totalS + totalA;
+    if (total > 0) {
+      const sPct = ((totalS / total) * 100).toFixed(0);
+      const aPct = ((totalA / total) * 100).toFixed(0);
+      svg += '<div style="font-size:10px;color:#8b949e;margin-top:4px">累计: search=' + totalS + '(' + sPct + '%) / agg=' + totalA + '(' + aPct + '%)</div>';
+    }
+    host.innerHTML = svg;
+  }
+  function pushHistory(item) {
+    history.unshift(item);
+    if (history.length > MAX_HISTORY) history.length = MAX_HISTORY;
+    try { localStorage.setItem(LS_HISTORY, JSON.stringify(history)); } catch {}
+    if (historyOpen) { renderHistory(); renderHistoryChart(); }
+  }
+  function clearHistory() { history = []; try { localStorage.removeItem(LS_HISTORY); } catch {} renderHistory(); renderHistoryChart(); }
+  function toggleHistory() {
+    historyOpen = !historyOpen;
+    $('historyPanel').classList.toggle('open', historyOpen);
+    if (historyOpen) { renderHistory(); renderHistoryChart(); }
+  }
+  function renderHistory() {
+    const q = ($('hSearch')?.value || '').toLowerCase();
+    const tp = $('hType')?.value || 'all';
+    const rg = $('hRange')?.value || 'all';
+    const now = Date.now();
+    const rangeMs = { '1h': 3600e3, '1d': 86400e3, '7d': 7 * 86400e3 }[rg] || 0;
+    const items = history.filter(h => {
+      if (tp !== 'all' && h.type !== tp) return false;
+      if (rangeMs && (now - h.ts) > rangeMs) return false;
+      if (q && !(h.summary || '').toLowerCase().includes(q)) return false;
+      return true;
+    });
+    const list = $('hList');
+    if (!items.length) { list.innerHTML = '<div class="empty">无历史记录</div>'; return; }
+    list.innerHTML = items.map((h, i) => {
+      const idx = history.indexOf(h);
+      const when = new Date(h.ts).toLocaleString();
+      return `<div class="hitem" data-i="${idx}">
+        <div class="hwhen">${escapeHtml(when)}</div>
+        <div><span class="htype t-${h.type === 'agg' ? 'agg' : 'search'}">${h.type}</span><span class="hsummary">${escapeHtml(h.summary)}</span></div>
+        <div class="hactions"><span onclick="replayHistory(${idx})">▶ 重跑</span><span onclick="deleteHistory(${idx})" style="color:#f85149">× 删除</span></div>
+      </div>`;
+    }).join('');
+  }
+  function replayHistory(idx) {
+    const h = history[idx]; if (!h) return;
+    const p = h.params;
+    const t = activeTab();
+    if (p.index) { t.index = p.index; t.page = 0; }
+    if (p.kind === 'search') {
+      t.form.qField = p.qField || ''; t.form.qValue = p.qValue || ''; t.form.qType = p.qType || 'match_all';
+      t.form.qFrom = p.qFrom || 0; t.form.qSize = p.qSize || pageSize;
+    } else if (p.kind === 'agg') {
+      t.form.aggField = p.aggField || ''; t.form.aggSize = p.aggSize || 10; t.form.aggQuery = p.aggQuery || '';
+    }
+    saveTabs();
+    renderContent();
+    (p.kind === 'search' ? runSearch : runAgg)();
+  }
+  function deleteHistory(idx) {
+    history.splice(idx, 1);
+    try { localStorage.setItem(LS_HISTORY, JSON.stringify(history)); } catch {}
+    renderHistory();
   }
 
+  // ---------- 集群 / 任务 ----------
   async function loadTasks() {
     const r = await jget('/_tasks');
     if (r.ok && r.json?.nodes) {
@@ -276,11 +937,11 @@
       $('tasks').innerHTML = '<div class="empty" style="padding:0">-</div>';
     }
   }
-
   async function loadCluster() {
     const r = await jget('/_cluster/health');
     if (r.ok && r.json) {
-      $('cluster').innerHTML =
+      const stat = $('cluster');
+      if (stat) stat.innerHTML =
         '<div><b>' + r.json.status + '</b><span>cluster status</span></div>' +
         '<div><b>' + r.json.number_of_nodes + '</b><span>nodes</span></div>' +
         '<div><b>' + r.json.active_shards + '</b><span>shards</span></div>' +
@@ -288,6 +949,10 @@
     }
   }
 
+  // ---------- 启动 ----------
+  loadTabs();
+  renderTabs();
+  renderContent();
   loadHeader();
   loadIndices();
   loadCluster();
