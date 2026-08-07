@@ -519,6 +519,110 @@ RES=$(curl -s -X POST "$GO_ES_URL/$BM_IDX/_search" -H 'Content-Type: application
 SORT_FIRST=$(echo "$RES" | jq -r '.hits.hits[0]._id // ""' 2>/dev/null)
 if [ "$SORT_FIRST" = "1" ]; then ok "显式 sort 生效 (按 _id asc, first=$SORT_FIRST)"; else fail "sort override" "first=$SORT_FIRST"; fi
 
+# ---------- 16. _delete_by_query ----------
+header "16. _delete_by_query"
+TS_DQ=$(date +%s)
+DQ_IDX="dq_${TS_DQ}"
+curl -s -X PUT "$GO_ES_URL/$DQ_IDX" >/dev/null
+for n in 1 2 3 4 5; do
+  STATUS=active
+  if [ $((n % 2)) -eq 0 ]; then STATUS=inactive; fi
+  curl -s -X PUT "$GO_ES_URL/$DQ_IDX/_doc/$n" -H 'Content-Type: application/json' \
+    -d "{\"n\":$n,\"status\":\"$STATUS\"}" >/dev/null
+done
+
+# 16a. 同步: 删 status=active(应该是 3 条: 1,3,5)
+RES=$(curl -s -X POST "$GO_ES_URL/$DQ_IDX/_delete_by_query" -H 'Content-Type: application/json' \
+  -d '{"query":{"term":{"status":"active"}}}')
+DEL=$(echo "$RES" | jq -r '.deleted // 0' 2>/dev/null)
+TOTAL=$(echo "$RES" | jq -r '.total // 0' 2>/dev/null)
+if [ "$DEL" = "3" ] && [ "$TOTAL" = "3" ]; then
+  ok "delete_by_query sync: deleted=3, total=3"
+else
+  fail "delete_by_query sync" "deleted=$DEL total=$TOTAL"
+fi
+
+# 16b. 验证剩余 2 条 inactive
+RES=$(curl -s -X POST "$GO_ES_URL/$DQ_IDX/_search" -H 'Content-Type: application/json' \
+  -d '{"query":{"match_all":{}},"size":10}')
+REMAIN=$(echo "$RES" | jq -r '.hits.total.value // 0' 2>/dev/null)
+if [ "$REMAIN" = "2" ]; then ok "剩余 2 条 (inactive)"; else fail "remaining" "got=$REMAIN"; fi
+
+# 16c. 异步模式
+RES=$(curl -s -X POST "$GO_ES_URL/$DQ_IDX/_delete_by_query?wait_for_completion=false" -H 'Content-Type: application/json' \
+  -d '{"query":{"match_all":{}}}')
+TASK_ID=$(echo "$RES" | jq -r '.task // empty' 2>/dev/null)
+if [ -n "$TASK_ID" ]; then ok "delete_by_query async 返回 task=$TASK_ID"; else fail "async delete_by_query" "no task id"; fi
+
+# 16d. 等待任务完成
+if [ -n "${TASK_ID:-}" ]; then
+  DONE=0
+  for i in $(seq 1 50); do
+    DETAIL=$(curl -s "$GO_ES_URL/_tasks/$TASK_ID")
+    if echo "$DETAIL" | grep -q '"completed":true'; then
+      DONE=1
+      STATUS=$(echo "$DETAIL" | jq -r '.task.status // ""' 2>/dev/null)
+      DELETED=$(echo "$DETAIL" | jq -r '.task.task_status.deleted // 0' 2>/dev/null)
+      if [ "$STATUS" = "completed" ] && [ "$DELETED" = "2" ] 2>/dev/null; then
+        ok "delete_by_query async 任务 completed, deleted=2"
+      else
+        fail "delete_by_query task result" "status=$STATUS deleted=$DELETED"
+      fi
+      break
+    fi
+    sleep 0.1
+  done
+  if [ $DONE -eq 0 ]; then fail "delete_by_query task polling" "timeout"; fi
+fi
+
+# ---------- 17. _update_by_query ----------
+header "17. _update_by_query"
+TS_UQ=$(date +%s)
+UQ_IDX="uq_${TS_UQ}"
+curl -s -X PUT "$GO_ES_URL/$UQ_IDX" >/dev/null
+for n in 1 2 3; do
+  curl -s -X PUT "$GO_ES_URL/$UQ_IDX/_doc/$n" -H 'Content-Type: application/json' \
+    -d "{\"n\":$n,\"status\":\"active\"}" >/dev/null
+done
+
+# 17a. 同步: 用 script 把所有 status 改为 archived
+RES=$(curl -s -X POST "$GO_ES_URL/$UQ_IDX/_update_by_query" -H 'Content-Type: application/json' \
+  -d '{"query":{"match_all":{}},"script":{"source":"ctx._source.status = '"'"'archived'"'"'"}}')
+UPDATED=$(echo "$RES" | jq -r '.updated // 0' 2>/dev/null)
+if [ "$UPDATED" = "3" ]; then ok "update_by_query sync: updated=3"; else fail "update_by_query sync" "updated=$UPDATED"; fi
+
+# 17b. 验证所有 doc 的 status 确实改了
+RES=$(curl -s -X POST "$GO_ES_URL/$UQ_IDX/_search" -H 'Content-Type: application/json' \
+  -d '{"query":{"term":{"status":"archived"}},"size":10}')
+N=$(echo "$RES" | jq -r '.hits.total.value // 0' 2>/dev/null)
+if [ "$N" = "3" ]; then ok "3 条都被改成 archived"; else fail "after update" "got=$N"; fi
+
+# 17c. += 脚本: 增加 views 字段
+for n in 1 2 3; do
+  curl -s -X POST "$GO_ES_URL/$UQ_IDX/_update/$n" -H 'Content-Type: application/json' \
+    -d '{"doc":{"views":10}}' >/dev/null
+done
+# 注: _update 走部分更新, 这里简单走 _update_by_query
+RES=$(curl -s -X POST "$GO_ES_URL/$UQ_IDX/_update_by_query" -H 'Content-Type: application/json' \
+  -d '{"query":{"match_all":{}},"script":{"source":"ctx._source.views += 5"}}')
+UPDATED2=$(echo "$RES" | jq -r '.updated // 0' 2>/dev/null)
+# views 字段不存在时 += 5 会让 doc.views=5
+if [ "$UPDATED2" = "3" ]; then ok "inc 脚本: updated=3 (views += 5)"; else fail "inc script" "updated=$UPDATED2"; fi
+
+# 17d. 缺 script -> 400
+assert_status "update_by_query no script -> 400" 400 POST "$GO_ES_URL/$UQ_IDX/_update_by_query" \
+  '{"query":{"match_all":{}}}' "application/json"
+
+# 17e. 非法 script -> 400
+assert_status "update_by_query invalid script -> 400" 400 POST "$GO_ES_URL/$UQ_IDX/_update_by_query" \
+  '{"query":{"match_all":{}},"script":{"source":"INVALID STATEMENT"}}' "application/json"
+
+# 17f. 异步模式
+RES=$(curl -s -X POST "$GO_ES_URL/$UQ_IDX/_update_by_query?wait_for_completion=false" -H 'Content-Type: application/json' \
+  -d '{"query":{"match_all":{}},"script":{"source":"ctx._source.tag = '"'"'batch'"'"'"}}')
+TASK_ID=$(echo "$RES" | jq -r '.task // empty' 2>/dev/null)
+if [ -n "$TASK_ID" ]; then ok "update_by_query async 返回 task=$TASK_ID"; else fail "async update_by_query" "no task id"; fi
+
 # ---------- 13. config 加载 + 热更新 ----------
 header "13. 配置文件加载(无配置应不影响启动)"
 # 自研 server 当前没挂 -config 也能起, 这里通过 /metrics 已包含 go_es_build_info 验证
