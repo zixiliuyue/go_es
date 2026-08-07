@@ -379,8 +379,12 @@ func TestUI_ChartSurface(t *testing.T) {
 		"viewBox=",                          // SVG 标志
 		"24h",                               // 24 小时窗口
 		"<rect",                             // 柱状条 SVG 元素
-		"fill=\"#1f6feb\"",                  // search 蓝色
-		"fill=\"#d2a8ff\"",                  // agg 紫色
+		"class=\"bar-search\"",              // search 柱用 CSS 类(主题切换需要)
+		"class=\"bar-agg\"",                 // agg 柱用 CSS 类(主题切换需要)
+		"class=\"bar-axis\"",                // 轴线用 CSS 类
+		"class=\"bar-label\"",               // 标签用 CSS 类
+		"class=\"l-search\"",                // 图例 search 用 CSS 类
+		"class=\"l-agg\"",                   // 图例 agg 用 CSS 类
 		"暂无数据",                          // 空态文案
 	}
 	for _, s := range required {
@@ -421,4 +425,163 @@ func TestUI_ImportPayloadSpec(t *testing.T) {
 	_ = json.Unmarshal(b2, &rt2)
 	// 我们的 spec 是 version 必须 = 1
 	assert.NotEqual(t, 1, rt2["version"], "version 错应在 import 端拒绝")
+}
+
+// ---------- 主题切换(dark / light) ----------
+
+// 1) /_ui 必须含主题切换控件 + 主题变量定义
+func TestUI_ThemeSwitchSurface(t *testing.T) {
+	ts := newTestServer(t)
+	resp, body := do(t, ts, "GET", "/_ui", nil)
+	assert.Equal(t, 200, resp.StatusCode)
+	html := string(body)
+	required := []string{
+		`id="themeSelect"`,                     // 主题切换控件
+		"function setTheme(",                    // 切换函数
+		"function getTheme(",                    // 读取函数
+		"function syncThemeSelect(",             // 启动时同步
+		"data-theme=\"dark\"",                   // 默认 dark 变量块
+		"data-theme=\"light\"",                  // light 主题变量块
+		"go_es_theme",                           // localStorage 持久化 key
+		"onchange=\"setTheme(this.value)\"",     // 控件 onchange 绑定
+		"深色",                                  // 中文选项
+		"浅色",                                  // 中文选项
+		"prefers-reduced-motion",                // 无障碍
+		"--bg:",                                 // 主题变量
+		"--text:",                               // 文本变量
+		"--border:",                             // 边框变量
+		"--accent:",                             // 强调色变量
+	}
+	for _, s := range required {
+		assert.Contains(t, html, s, "/_ui 应含 theme hook: %s", s)
+	}
+}
+
+// 2) <head> 顶部内联脚本必须在 <body> 之前执行, 避免 dark→light 闪烁(FOUC)
+func TestUI_ThemeNoFOUC(t *testing.T) {
+	ts := newTestServer(t)
+	resp, body := do(t, ts, "GET", "/_ui", nil)
+	assert.Equal(t, 200, resp.StatusCode)
+	html := string(body)
+	// 找到内联脚本, 确认它的位置在 <body> 之前
+	scriptIdx := strings.Index(html, "document.documentElement.setAttribute('data-theme'")
+	bodyIdx := strings.Index(html, "<body>")
+	assert.GreaterOrEqual(t, scriptIdx, 0, "应有内联主题脚本")
+	assert.GreaterOrEqual(t, bodyIdx, 0, "应有 <body>")
+	assert.Less(t, scriptIdx, bodyIdx, "内联主题脚本必须在 <body> 之前 (防 FOUC)")
+	// 内联脚本应在 <head> 内(在 </head> 之前)
+	headEndIdx := strings.Index(html, "</head>")
+	assert.Less(t, scriptIdx, headEndIdx, "内联主题脚本应在 </head> 之前")
+}
+
+// 3) 主题必须在 localStorage 中持久化, key 命名稳定
+func TestUI_ThemePersistenceKey(t *testing.T) {
+	ts := newTestServer(t)
+	resp, body := do(t, ts, "GET", "/_ui", nil)
+	assert.Equal(t, 200, resp.StatusCode)
+	html := string(body)
+	// 出现 LS_THEME 常量声明 + 使用
+	assert.Contains(t, html, "LS_THEME = 'go_es_theme'", "应有 LS_THEME 常量")
+	assert.Contains(t, html, "localStorage.setItem(LS_THEME", "setTheme 必须写 localStorage")
+	assert.Contains(t, html, "localStorage.getItem('go_es_theme')", "head 脚本必须读 localStorage 还原")
+}
+
+// 4) 亮色主题必须定义完整的样式变量(背景/文本/边框/强调色/状态色)
+func TestUI_LightThemeVariablesComplete(t *testing.T) {
+	ts := newTestServer(t)
+	resp, body := do(t, ts, "GET", "/_ui", nil)
+	assert.Equal(t, 200, resp.StatusCode)
+	html := string(body)
+	// 找到 light 主题块
+	lightStart := strings.Index(html, "[data-theme=\"light\"]")
+	assert.GreaterOrEqual(t, lightStart, 0, "应有 light 主题 CSS 块")
+	// 在 light 块内必须有以下核心变量(任一缺失说明样式不完整)
+	// 取 light 块到下一个 `}` 之间的内容做断言
+	endRel := strings.Index(html[lightStart:], "}\n  </style>")
+	if endRel < 0 { endRel = strings.Index(html[lightStart:], "}"); }
+	assert.Greater(t, endRel, 0)
+	lightBlock := html[lightStart : lightStart+endRel]
+	required := []string{
+		"--bg:",
+		"--bg-elevated:",
+		"--bg-header:",
+		"--bg-input:",
+		"--bg-hover:",
+		"--border:",
+		"--text:",
+		"--text-muted:",
+		"--text-dim:",
+		"--text-faint:",
+		"--accent:",
+		"--accent-hover:",
+		"--ok:",
+		"--err:",
+		"--warn:",
+		"--link:",
+		"--chart-bar-search:",
+		"--chart-bar-agg:",
+		"--chart-axis:",
+		"--chart-label:",
+	}
+	for _, s := range required {
+		assert.Contains(t, lightBlock, s, "light 主题必须含变量 %s", s)
+	}
+}
+
+// 5) 主题切换不会触发重渲染(纯 CSS 变量, 不重 buildTabHTML)
+func TestUI_ThemeSwitchPureCSS(t *testing.T) {
+	ts := newTestServer(t)
+	resp, body := do(t, ts, "GET", "/_ui", nil)
+	assert.Equal(t, 200, resp.StatusCode)
+	html := string(body)
+	// setTheme 不应调用 renderContent / renderTabs (避免闪烁/重渲染)
+	idx := strings.Index(html, "function setTheme(")
+	endIdx := strings.Index(html[idx:], "\n  }")
+	assert.Greater(t, endIdx, 0, "setTheme 函数体未找到")
+	body1 := html[idx : idx+endIdx]
+	assert.NotContains(t, body1, "renderContent", "setTheme 不应触发 renderContent (会闪)")
+	assert.NotContains(t, body1, "renderTabs", "setTheme 不应触发 renderTabs (会闪)")
+	assert.NotContains(t, body1, "location.reload", "setTheme 不应 reload (会闪)")
+	assert.Contains(t, body1, "setAttribute('data-theme'", "setTheme 必须写 data-theme")
+	assert.Contains(t, body1, "LS_THEME", "setTheme 必须持久化到 localStorage")
+}
+
+// 6) 浏览器兼容性: 内联脚本仅用 IE11+ / 所有主流浏览器都支持的 API
+//    (不依赖 const/let/箭头函数, 不依赖 module, 不依赖新的 dataset API)
+func TestUI_ThemeBrowserCompat(t *testing.T) {
+	ts := newTestServer(t)
+	resp, body := do(t, ts, "GET", "/_ui", nil)
+	assert.Equal(t, 200, resp.StatusCode)
+	html := string(body)
+	// 找到 head 内的内联脚本(必须用 var, 不能用 const/let)
+	scriptIdx := strings.Index(html, "document.documentElement.setAttribute('data-theme'")
+	// 内联脚本大约从 <script> 标签到下一个 </script>
+	scriptStart := strings.LastIndex(html[:scriptIdx], "<script>")
+	scriptEnd := strings.Index(html[scriptIdx:], "</script>")
+	assert.Greater(t, scriptStart, 0)
+	assert.Greater(t, scriptEnd, 0)
+	inlineScript := html[scriptStart : scriptIdx+scriptEnd]
+	// 兼容性要求: 不使用 const/let/箭头函数(IE 不支持); 使用 var
+	assert.Contains(t, inlineScript, "var saved", "head 内联脚本应用 var 声明 (兼容 IE11)")
+	assert.NotContains(t, inlineScript, "const ", "head 内联脚本不应使用 const")
+	assert.NotContains(t, inlineScript, "let ", "head 内联脚本不应使用 let")
+	// try/catch 包裹 localStorage (Safari 隐私模式 / 异常处理)
+	assert.Contains(t, inlineScript, "try", "head 脚本应 try/catch 包裹 localStorage")
+	assert.Contains(t, inlineScript, "catch", "head 脚本应 catch 异常")
+}
+
+// 7) 主题切换控件应在 header 中, 跟其它工具按钮并列
+func TestUI_ThemeControlInHeader(t *testing.T) {
+	ts := newTestServer(t)
+	resp, body := do(t, ts, "GET", "/_ui", nil)
+	assert.Equal(t, 200, resp.StatusCode)
+	html := string(body)
+	// 找 header 块
+	headerStart := strings.Index(html, "<header>")
+	headerEnd := strings.Index(html, "</header>")
+	assert.Greater(t, headerStart, 0)
+	assert.Greater(t, headerEnd, headerStart)
+	headerHTML := html[headerStart:headerEnd]
+	assert.Contains(t, headerHTML, "id=\"themeSelect\"", "主题控件应在 header 内")
+	assert.Contains(t, headerHTML, "class=\"themeswitch\"", "主题控件容器应在 header 内")
 }

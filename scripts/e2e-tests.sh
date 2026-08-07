@@ -283,9 +283,42 @@ assert_contains "/_ui histChart 挂载点" 'id="histChart"' /tmp/last.json
 assert_contains "/_ui chartwrap CSS 类" 'chartwrap' /tmp/last.json
 assert_contains "/_ui SVG viewBox" 'viewBox=' /tmp/last.json
 assert_contains "/_ui SVG 柱状图 <rect" '<rect' /tmp/last.json
-assert_contains "/_ui search 蓝 #1f6feb" 'fill="#1f6feb"' /tmp/last.json
-assert_contains "/_ui agg 紫 #d2a8ff" 'fill="#d2a8ff"' /tmp/last.json
+assert_contains "/_ui 柱用 CSS 类 bar-search" 'class="bar-search"' /tmp/last.json
+assert_contains "/_ui 柱用 CSS 类 bar-agg" 'class="bar-agg"' /tmp/last.json
+assert_contains "/_ui 图表轴用 CSS 类 bar-axis" 'class="bar-axis"' /tmp/last.json
+assert_contains "/_ui 图表标签用 CSS 类 bar-label" 'class="bar-label"' /tmp/last.json
+assert_contains "/_ui 图例 search 用 CSS 类" 'class="l-search"' /tmp/last.json
+assert_contains "/_ui 图例 agg 用 CSS 类" 'class="l-agg"' /tmp/last.json
 assert_contains "/_ui 空态文案" '暂无数据' /tmp/last.json
+
+# 9h. 主题切换(dark / light)
+assert_contains "/_ui 有主题控件 themeSelect" 'id="themeSelect"' /tmp/last.json
+assert_contains "/_ui 有 themeswitch 容器" 'class="themeswitch"' /tmp/last.json
+assert_contains "/_ui 有 setTheme 函数" 'function setTheme(' /tmp/last.json
+assert_contains "/_ui 有 getTheme 函数" 'function getTheme(' /tmp/last.json
+assert_contains "/_ui 有 syncThemeSelect 函数" 'function syncThemeSelect(' /tmp/last.json
+assert_contains "/_ui 主题控件 onchange 绑定" 'onchange="setTheme(this.value)"' /tmp/last.json
+assert_contains "/_ui 有 dark 主题变量块" 'data-theme="dark"' /tmp/last.json
+assert_contains "/_ui 有 light 主题变量块" 'data-theme="light"' /tmp/last.json
+assert_contains "/_ui 持久化 key go_es_theme" 'go_es_theme' /tmp/last.json
+assert_contains "/_ui LS_THEME 常量声明" "LS_THEME = 'go_es_theme'" /tmp/last.json
+assert_contains "/_ui setTheme 写 localStorage" 'localStorage.setItem(LS_THEME' /tmp/last.json
+assert_contains "/_ui head 脚本读 localStorage" "localStorage.getItem('go_es_theme')" /tmp/last.json
+assert_contains "/_ui 中文选项 深色" '深色' /tmp/last.json
+assert_contains "/_ui 中文选项 浅色" '浅色' /tmp/last.json
+assert_contains "/_ui prefers-reduced-motion" 'prefers-reduced-motion' /tmp/last.json
+assert_contains "/_ui light 主题含 --bg 变量" '--bg:' /tmp/last.json
+assert_contains "/_ui light 主题含 --text 变量" '--text:' /tmp/last.json
+assert_contains "/_ui light 主题含 --border 变量" '--border:' /tmp/last.json
+assert_contains "/_ui light 主题含 --accent 变量" '--accent:' /tmp/last.json
+# head 内联脚本必须在 <body> 之前(防 FOUC)
+SCRIPT_POS=$(awk '/document\.documentElement\.setAttribute\(.data-theme./{print NR; exit}' /tmp/last.json)
+BODY_POS=$(awk '/<body>/{print NR; exit}' /tmp/last.json)
+if [ -n "$SCRIPT_POS" ] && [ -n "$BODY_POS" ] && [ "$SCRIPT_POS" -lt "$BODY_POS" ]; then
+  ok "主题内联脚本在 <body> 之前(防 FOUC) line=$SCRIPT_POS < $BODY_POS"
+else
+  fail "主题内联脚本位置" "script=$SCRIPT_POS body=$BODY_POS"
+fi
 
 # ---------- 10. gzip 协商 ----------
 header "10. gzip 协商头 (建议 #9 的 Vary 部分)"
