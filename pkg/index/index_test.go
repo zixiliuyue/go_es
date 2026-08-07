@@ -9,6 +9,7 @@ import (
 	"github.com/elastic/go-elasticsearch/v8"
 	"github.com/stretchr/testify/assert"
 	"github.com/zixiliuyue/go_es/pkg/client"
+	"github.com/zixiliuyue/go_es/pkg/errors"
 	"go.uber.org/zap"
 )
 

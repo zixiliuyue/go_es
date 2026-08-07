@@ -257,7 +257,11 @@ func TestTermsAggregation_Integration(t *testing.T) {
 	assert.NoError(t, err)
 
 	for name, aggDef := range aggMap {
-		builder.AddAggregation(name, aggDef)
+		// agg.Build() 返回 map[string]interface{}, 但 range 出来的 value 是 interface{}
+		// AddAggregation 需要 map[string]interface{}, 需要显式断言
+		m, ok := aggDef.(map[string]interface{})
+		assert.True(t, ok, "聚合定义必须是 map[string]interface{}, got %T", aggDef)
+		builder.AddAggregation(name, m)
 	}
 
 	resp, err := searcher.Search(ctx, indexName, builder)
@@ -288,7 +292,9 @@ func TestStatsAggregation_Integration(t *testing.T) {
 	assert.NoError(t, err)
 
 	for name, aggDef := range aggMap {
-		builder.AddAggregation(name, aggDef)
+		m, ok := aggDef.(map[string]interface{})
+		assert.True(t, ok, "聚合定义必须是 map[string]interface{}, got %T", aggDef)
+		builder.AddAggregation(name, m)
 	}
 
 	resp, err := searcher.Search(ctx, indexName, builder)
@@ -328,7 +334,9 @@ func TestNestedAggregation_Integration(t *testing.T) {
 
 	builder := search.NewSearch().Pagination(0, 0)
 	for name, aggDef := range aggMap {
-		builder.AddAggregation(name, aggDef)
+		m, ok := aggDef.(map[string]interface{})
+		assert.True(t, ok, "聚合定义必须是 map[string]interface{}, got %T", aggDef)
+		builder.AddAggregation(name, m)
 	}
 
 	resp, err := searcher.Search(ctx, indexName, builder)
@@ -361,7 +369,9 @@ func TestRangeAggregation_Integration(t *testing.T) {
 
 	builder := search.NewSearch().Pagination(0, 0)
 	for name, aggDef := range aggMap {
-		builder.AddAggregation(name, aggDef)
+		m, ok := aggDef.(map[string]interface{})
+		assert.True(t, ok, "聚合定义必须是 map[string]interface{}, got %T", aggDef)
+		builder.AddAggregation(name, m)
 	}
 
 	resp, err := searcher.Search(ctx, indexName, builder)

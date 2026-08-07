@@ -5,7 +5,6 @@ package bulkio
 import (
 	"bytes"
 	"context"
-	"encoding/csv"
 	"os"
 	"testing"
 
@@ -104,7 +103,7 @@ func TestImportFromCSVReader_NoSkipHeader(t *testing.T) {
 		IDField:     "",
 	}
 
-	total, success, failed, err := bulk.ImportFromCSVReader(ctx, reader, config, nil)
+	total, success, _, err := bulk.ImportFromCSVReader(ctx, reader, config, nil)
 	assert.NoError(t, err)
 	assert.Equal(t, int64(2), total)
 	// 每条都会成功，因为导入只是创建文档
@@ -204,14 +203,11 @@ func TestProgressCallback(t *testing.T) {
 
 	var called bool
 	var processed int64
-	var success int64
-	var failed int64
 
-	callback := func(p, t int64, s, f int64) {
+	callback := func(p, t int64, _, _ int) {
 		called = true
 		processed = p
-		success = s
-		failed = f
+		_ = t
 	}
 
 	csvData := `a,b,c
