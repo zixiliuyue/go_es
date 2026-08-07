@@ -2,6 +2,7 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
 	stdSort "sort"
 	"strings"
@@ -109,6 +110,26 @@ func (s *Server) doSearch(w http.ResponseWriter, r *http.Request, indices []stri
 			"hits": allHits,
 		},
 	}
+	// 聚合: 在已命中的 hits 上求值(每个 hit 携 (index, docID) 信息)
+	if len(req.Aggregations) > 0 {
+		indexedHits := make([]search.IndexedHit, 0, total)
+		for _, h := range allHits {
+			indexedHits = append(indexedHits, search.IndexedHit{Index: h.Index, DocID: h.ID})
+		}
+		aggReqs, err := parseAggregationRequests(req.Aggregations)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "parsing_exception", err.Error(), "")
+			return
+		}
+		aggRes, err := search.EvalAggregations(indexedHits, aggReqs)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "aggregation_execution_exception", err.Error(), "")
+			return
+		}
+		if len(aggRes) > 0 {
+			resp["aggregations"] = map[string]interface{}(aggRes)
+		}
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -118,6 +139,9 @@ type searchRequest struct {
 	Size  int                      `json:"size,omitempty"`
 	Sort  []map[string]string      `json:"sort,omitempty"`
 	Query map[string]interface{}   `json:"query,omitempty"`
+	// 新增: 聚合定义, 形如 {"name1": {"terms": {...}}, "name2": {"avg": {...}}}
+	// 与 ES 兼容: 顶层 key 是聚合名, value 是 {"<agg_type>": <def>}
+	Aggregations map[string]interface{} `json:"aggs,omitempty"`
 }
 
 // hit 单条命中
@@ -235,6 +259,24 @@ func compareValues(a, b interface{}) int {
 	return 0
 }
 
+// parseAggregationRequests 把 search 请求体里的 aggs map 转为 search.AggregationRequest 列表.
+// 输入形如: {"g1": {"terms": {...}}, "g2": {"avg": {...}}}
+// 输出: [{Key: "g1", Spec: {"terms": {...}}}, ...]
+func parseAggregationRequests(raw map[string]interface{}) ([]search.AggregationRequest, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	out := make([]search.AggregationRequest, 0, len(raw))
+	for name, def := range raw {
+		spec, ok := def.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("aggregation %q must be an object", name)
+		}
+		out = append(out, search.AggregationRequest{Key: name, Spec: spec})
+	}
+	return out, nil
+}
+
 // listAllIndexes 通过扫描 meta/ 前缀得到所有索引
 func (s *Server) listAllIndexes() []string {
 	out := make([]string, 0)
@@ -250,11 +292,40 @@ func (s *Server) listAllIndexes() []string {
 
 // buildEmptyResponse 当没有任何索引时的返回结构
 func buildEmptyResponse(req searchRequest) map[string]interface{} {
-	return map[string]interface{}{
+	resp := map[string]interface{}{
 		"took": 0,
 		"hits": map[string]interface{}{
 			"total": map[string]interface{}{"value": 0, "relation": "eq"},
 			"hits":  []hit{},
 		},
 	}
+	// 聚合: 即使无命中, 也返回空聚合结果(与 ES 行为一致)
+	if len(req.Aggregations) > 0 {
+		empty := make(map[string]interface{}, len(req.Aggregations))
+		for name, def := range req.Aggregations {
+			if spec, ok := def.(map[string]interface{}); ok {
+				empty[name] = emptyAggResult(spec)
+			}
+		}
+		resp["aggregations"] = empty
+	}
+	return resp
+}
+
+// emptyAggResult 给定聚合定义, 返回无命中时的合理空结构
+func emptyAggResult(spec map[string]interface{}) map[string]interface{} {
+	if len(spec) != 1 {
+		return map[string]interface{}{}
+	}
+	for typ := range spec {
+		switch typ {
+		case "terms", "histogram", "date_histogram", "range":
+			return map[string]interface{}{"buckets": []interface{}{}}
+		case "value_count", "avg", "sum", "min", "max", "cardinality":
+			return map[string]interface{}{"value": nil}
+		case "stats":
+			return map[string]interface{}{"count": 0, "min": nil, "max": nil, "avg": nil, "sum": 0.0}
+		}
+	}
+	return map[string]interface{}{}
 }

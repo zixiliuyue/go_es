@@ -41,6 +41,10 @@ func (e *Engine) Match(index string, q *Query) ([]string, error) {
 	if q == nil {
 		return e.allDocs(index), nil
 	}
+	// 空 query(无任何字段) 视为 match_all, 与 ES 行为一致
+	if q.Bool == nil && q.MatchAll == nil && q.Match == nil && q.Term == nil && q.Terms == nil && q.Range == nil {
+		return e.allDocs(index), nil
+	}
 
 	// 优先处理 bool(ES 不允许与其它 leaf query 组合)
 	if q.Bool != nil {

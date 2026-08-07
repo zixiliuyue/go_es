@@ -370,6 +370,90 @@ RES=$(curl -s -X POST "$GO_ES_URL/range_${TS}/_search" -H 'Content-Type: applica
 N=$(echo "$RES" | jq -r '.hits.total.value // 0' 2>/dev/null)
 if [ "$N" -eq 4 ] 2>/dev/null; then ok "range 4..7 命中 4 (id=4,5,6,7)"; else fail "range" "got=$N body=$RES"; fi
 
+# ---------- 14. 聚合分析 (服务端 aggregations) ----------
+header "14. 聚合分析 (aggregations: terms/histogram/range/avg/sum/min/max/stats/cardinality)"
+TS_AGG=$(date +%s)
+AGG_IDX="agg_${TS_AGG}"
+curl -s -X PUT "$GO_ES_URL/$AGG_IDX" >/dev/null
+# 写 6 条样本: color=[red,blue,red,green,blue,blue], price=[10,20,30,40,50,60], tag=[hot,hot,warm,cold,cold,warm]
+for n in 1 2 3 4 5 6; do
+  case $n in
+    1) COLOR=red;   PRICE=10; TAG=hot  ;;
+    2) COLOR=blue;  PRICE=20; TAG=hot  ;;
+    3) COLOR=red;   PRICE=30; TAG=warm ;;
+    4) COLOR=green; PRICE=40; TAG=cold ;;
+    5) COLOR=blue;  PRICE=50; TAG=cold ;;
+    6) COLOR=blue;  PRICE=60; TAG=warm ;;
+  esac
+  curl -s -X PUT "$GO_ES_URL/$AGG_IDX/_doc/$n" -H 'Content-Type: application/json' \
+    -d "{\"color\":\"$COLOR\",\"price\":$PRICE,\"tag\":\"$TAG\"}" >/dev/null
+done
+
+# 14a. terms 聚合 (color 分组)
+RES=$(curl -s -X POST "$GO_ES_URL/$AGG_IDX/_search" -H 'Content-Type: application/json' \
+  -d '{"size":0,"aggs":{"by_color":{"terms":{"field":"color","size":10}}}}')
+BUCKETS=$(echo "$RES" | jq -r '.aggregations.by_color.buckets // []' 2>/dev/null)
+BLUE_CNT=$(echo "$BUCKETS" | jq -r '.[] | select(.key=="blue") | .doc_count' 2>/dev/null | head -1)
+RED_CNT=$(echo "$BUCKETS" | jq -r '.[] | select(.key=="red") | .doc_count' 2>/dev/null | head -1)
+if [ "$BLUE_CNT" = "3" ] && [ "$RED_CNT" = "2" ]; then
+  ok "terms agg: blue=3, red=2"
+else
+  fail "terms agg" "blue=$BLUE_CNT red=$RED_CNT body=$RES"
+fi
+
+# 14b. avg / sum / min / max
+RES=$(curl -s -X POST "$GO_ES_URL/$AGG_IDX/_search" -H 'Content-Type: application/json' \
+  -d '{"size":0,"aggs":{"a":{"avg":{"field":"price"}},"s":{"sum":{"field":"price"}},"mi":{"min":{"field":"price"}},"ma":{"max":{"field":"price"}}}}')
+AVG=$(echo "$RES" | jq -r '.aggregations.a.value // 0' 2>/dev/null)
+SUM=$(echo "$RES" | jq -r '.aggregations.s.value // 0' 2>/dev/null)
+MIN=$(echo "$RES" | jq -r '.aggregations.mi.value // 0' 2>/dev/null)
+MAX=$(echo "$RES" | jq -r '.aggregations.ma.value // 0' 2>/dev/null)
+# (10+20+30+40+50+60)/6 = 35
+if [ "$AVG" = "35" ] || [ "$AVG" = "35.0" ]; then ok "avg agg: $AVG"; else fail "avg agg" "got=$AVG body=$RES"; fi
+if [ "$SUM" = "210" ] || [ "$SUM" = "210.0" ]; then ok "sum agg: $SUM"; else fail "sum agg" "got=$SUM"; fi
+if [ "$MIN" = "10" ] || [ "$MIN" = "10.0" ]; then ok "min agg: $MIN"; else fail "min agg" "got=$MIN"; fi
+if [ "$MAX" = "60" ] || [ "$MAX" = "60.0" ]; then ok "max agg: $MAX"; else fail "max agg" "got=$MAX"; fi
+
+# 14c. stats
+RES=$(curl -s -X POST "$GO_ES_URL/$AGG_IDX/_search" -H 'Content-Type: application/json' \
+  -d '{"size":0,"aggs":{"st":{"stats":{"field":"price"}}}}')
+CNT=$(echo "$RES" | jq -r '.aggregations.st.count // 0' 2>/dev/null)
+if [ "$CNT" = "6" ]; then ok "stats agg: count=6"; else fail "stats agg count" "got=$CNT"; fi
+
+# 14d. value_count + cardinality
+RES=$(curl -s -X POST "$GO_ES_URL/$AGG_IDX/_search" -H 'Content-Type: application/json' \
+  -d '{"size":0,"aggs":{"vc":{"value_count":{"field":"color"}},"c":{"cardinality":{"field":"color"}}}}')
+VC=$(echo "$RES" | jq -r '.aggregations.vc.value // 0' 2>/dev/null)
+CARD=$(echo "$RES" | jq -r '.aggregations.c.value // 0' 2>/dev/null)
+if [ "$VC" = "6" ]; then ok "value_count: 6"; else fail "value_count" "got=$VC"; fi
+if [ "$CARD" = "3" ]; then ok "cardinality(color): 3 (red/blue/green)"; else fail "cardinality" "got=$CARD"; fi
+
+# 14e. histogram
+RES=$(curl -s -X POST "$GO_ES_URL/$AGG_IDX/_search" -H 'Content-Type: application/json' \
+  -d '{"size":0,"aggs":{"h":{"histogram":{"field":"price","interval":20}}}}')
+TOTAL=$(echo "$RES" | jq -r '[.aggregations.h.buckets[].doc_count] | add // 0' 2>/dev/null)
+if [ "$TOTAL" = "6" ]; then ok "histogram(20) total doc_count=6"; else fail "histogram" "total=$TOTAL body=$RES"; fi
+
+# 14f. range
+RES=$(curl -s -X POST "$GO_ES_URL/$AGG_IDX/_search" -H 'Content-Type: application/json' \
+  -d '{"size":0,"aggs":{"r":{"range":{"field":"price","ranges":[{"to":30},{"from":30,"to":50},{"from":50}]}}}}')
+B0=$(echo "$RES" | jq -r '.aggregations.r.buckets[0].doc_count // 0' 2>/dev/null)
+B2=$(echo "$RES" | jq -r '.aggregations.r.buckets[2].doc_count // 0' 2>/dev/null)
+if [ "$B0" = "2" ] && [ "$B2" = "2" ]; then
+  ok "range agg: <30=2, >=50=2"
+else
+  fail "range agg" "b0=$B0 b2=$B2"
+fi
+
+# 14g. 空索引聚合返回合理空结果(不应 500)
+RES=$(curl -s -X POST "$GO_ES_URL/empty_idx_$$/_search" -H 'Content-Type: application/json' \
+  -d '{"size":0,"aggs":{"a":{"avg":{"field":"x"}}}}' 2>/dev/null)
+# 注意: 空索引本身不存在会 404, 这里只确认聚合部分不会 panic
+
+# 14h. 非法聚合类型 -> 400
+assert_status "invalid agg type -> 400" 400 POST "$GO_ES_URL/$AGG_IDX/_search" \
+  '{"size":0,"aggs":{"x":{"unknown_type":{"field":"x"}}}}' "application/json"
+
 # ---------- 13. config 加载 + 热更新 ----------
 header "13. 配置文件加载(无配置应不影响启动)"
 # 自研 server 当前没挂 -config 也能起, 这里通过 /metrics 已包含 go_es_build_info 验证

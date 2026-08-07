@@ -35,12 +35,17 @@ type Engine struct {
 // 不会自动加载任何数据(由 LoadIndex 主动载入)
 func New(store *storage.Store) *Engine {
 	inverted := make(map[string]map[string]map[string]map[string]struct{})
-	return &Engine{
+	e := &Engine{
 		docs:        make(map[string]map[string]map[string]interface{}),
 		inverted:    inverted,
 		sortedCache: newSortedIndexCache(),
 		store:       store,
 	}
+	// 注入 source 查询给聚合包使用(避免 search 包内部循环 import)
+	SetSourceLookup(func(index, id string) (map[string]interface{}, bool) {
+		return e.GetSource(index, id)
+	})
+	return e
 }
 
 // IndexDoc 索引一个文档(同时维护倒排)
