@@ -264,6 +264,21 @@ func ComponentTplKey(name string) []byte {
 	return []byte("tpl/component/" + name)
 }
 
+// DocTFPrefix per-doc 分词结果前缀(doc-tf/<index>/<id> -> {field: [tokens]})
+func DocTFPrefix(index string) []byte {
+	return []byte("doc-tf/" + index + "/")
+}
+
+// DocTFKey per-doc 分词结果键
+func DocTFKey(index, id string) []byte {
+	return []byte("doc-tf/" + index + "/" + id)
+}
+
+// PostingsVersionKey 倒排版本号(每次写递增, 用于缓存失效判定)
+func PostingsVersionKey(index string) []byte {
+	return []byte("postings-version/" + index)
+}
+
 // IngestKey Ingest 管道键
 func IngestKey(name string) []byte {
 	return []byte("ingest/" + name)

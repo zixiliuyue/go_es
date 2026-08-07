@@ -30,7 +30,9 @@ type Engine struct {
 	sortedCache *sortedIndexCache
 	// scorer: BM25 打分所需的扩展倒排(field-level 统计 + per-doc tf)
 	scorer *Scorer
-	store  *storage.Store
+	// persistence: 倒排持久化(per-doc 分词落盘 + version 追踪)
+	persistence *indexPersistence
+	store       *storage.Store
 }
 
 // New 创建一个新的 Engine
@@ -42,6 +44,7 @@ func New(store *storage.Store) *Engine {
 		inverted:    inverted,
 		sortedCache: newSortedIndexCache(),
 		scorer:      newScorer(),
+		persistence: newIndexPersistence(),
 		store:       store,
 	}
 	// 注入 source 查询给聚合包使用(避免 search 包内部循环 import)
@@ -60,7 +63,18 @@ func New(store *storage.Store) *Engine {
 //	doc: 文档 _source
 func (e *Engine) IndexDoc(index, id string, doc map[string]interface{}) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
+	e.indexDocInMemory(index, id, doc)
+	e.mu.Unlock()
+	// 异步/同步 落盘 doc-tf (不持锁)
+	if e.store != nil {
+		tokens := e.collectTokensForDoc(doc)
+		_ = e.persistDocTokens(index, id, tokens)
+	}
+}
+
+// indexDocInMemory 仅操作内存 (锁内), 不做落盘
+// 用于 LoadAll 等批量场景
+func (e *Engine) indexDocInMemory(index, id string, doc map[string]interface{}) {
 	if e.docs[index] == nil {
 		e.docs[index] = make(map[string]map[string]interface{})
 	}
@@ -111,7 +125,16 @@ func (e *Engine) indexField(index, id, field string, raw interface{}) {
 // DeleteDoc 删除一个文档
 func (e *Engine) DeleteDoc(index, id string) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
+	e.deleteDocInMemory(index, id)
+	e.mu.Unlock()
+	// 落盘: 删 doc-tf
+	if e.store != nil {
+		_ = e.deleteDocTokens(index, id)
+	}
+}
+
+// deleteDocInMemory 仅内存删 (锁内)
+func (e *Engine) deleteDocInMemory(index, id string) {
 	if docs, ok := e.docs[index]; ok {
 		if doc, ok := docs[id]; ok {
 			// 从倒排里逐个 token 移除
@@ -153,60 +176,7 @@ func (e *Engine) unindexField(index, id, field string, raw interface{}) {
 	}
 }
 
-// LoadIndex 从 storage 加载某个索引的所有文档,重建内存倒排
-// 启动或测试场景使用
-func (e *Engine) LoadIndex(index string) error {
-	docs := make(map[string]map[string]interface{})
-	err := e.store.Scan(storage.DocPrefix(index), func(_, v []byte) error {
-		var doc map[string]interface{}
-		if err := jsonUnmarshal(v, &doc); err != nil {
-			return err
-		}
-		// 文档 _id 已在 storage key 中,这里反向解析
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-	// 上面 Scan 只重建了 docs,真正加载 doc->source 需要带上 id;
-	// 简单起见,我们额外提供一个直接索引方法
-	_ = docs
-	return nil
-}
-
-// LoadAll 加载所有索引(简单实现,只遍历已知索引)
-// 这里采用 doc/* 前缀全量扫描,逐条加进内存
-func (e *Engine) LoadAll() error {
-	rows := make(map[string]map[string]map[string]interface{})
-	err := e.store.Scan([]byte("doc/"), func(k, v []byte) error {
-		// 解析 key: doc/<index>/<id>
-		rest := strings.TrimPrefix(string(k), "doc/")
-		sep := strings.IndexByte(rest, '/')
-		if sep < 0 {
-			return nil
-		}
-		index := rest[:sep]
-		id := rest[sep+1:]
-		var doc map[string]interface{}
-		if err := jsonUnmarshal(v, &doc); err != nil {
-			return err
-		}
-		if rows[index] == nil {
-			rows[index] = make(map[string]map[string]interface{})
-		}
-		rows[index][id] = doc
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-	for idx, docs := range rows {
-		for id, doc := range docs {
-			e.IndexDoc(idx, id, doc)
-		}
-	}
-	return nil
-}
+// LoadAll 见 persistence.go (loadAllOptimized)
 
 // matchDocs 在某字段上查找匹配的 docID 集合
 func (e *Engine) matchDocs(index, field, value string) map[string]struct{} {
@@ -283,6 +253,11 @@ func (e *Engine) BM25FieldScore(index, field, docID, query string) float64 {
 	}
 	toks := tokenize(query)
 	return BM25Score(stats.TotalDocs, stats.AvgFieldLen, toks, field, e.scorer, index, docID)
+}
+
+// timeNow 返回当前毫秒时间戳, 顶层封装便于 mock
+func timeNow() int64 {
+	return stdTimeNow()
 }
 
 // ensureFieldStats 取得字段统计; 若缺失,触发一次重建后返回

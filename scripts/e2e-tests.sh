@@ -953,6 +953,82 @@ RES=$(curl -s -X POST "$GO_ES_URL/$MM_IDX/_search" -H 'Content-Type: application
 N=$(echo "$RES" | jq -r '.hits.total.value // 0' 2>/dev/null)
 if [ "$N" -ge "1" ]; then ok "sqs 语法错也不抛 (got=$N)"; else fail "sqs no-error" "got=$N"; fi
 
+# ---------- 27. 倒排持久化与重建 ----------
+header "27. 倒排持久化与重建"
+TS_PE=$(date +%s)
+PE_IDX="pe_${TS_PE}"
+curl -s -X PUT "$GO_ES_URL/$PE_IDX" >/dev/null
+# 写 3 条 doc
+for n in 1 2 3; do
+  curl -s -X PUT "$GO_ES_URL/$PE_IDX/_doc/$n" -H 'Content-Type: application/json' \
+    -d "{\"title\":\"the quick brown fox $n\"}" >/dev/null
+done
+
+# 27a. 倒排 info 端点
+RES=$(curl -s -X GET "$GO_ES_URL/$PE_IDX/_inverted/info")
+DOC_COUNT=$(echo "$RES" | jq -r '.doc_count // 0' 2>/dev/null)
+FIELD_COUNT=$(echo "$RES" | jq -r '.field_count // 0' 2>/dev/null)
+TOKEN_COUNT=$(echo "$RES" | jq -r '.token_count // 0' 2>/dev/null)
+PERSISTED=$(echo "$RES" | jq -r '.has_doc_tf_persisted // false' 2>/dev/null)
+VERSION=$(echo "$RES" | jq -r '.postings_version // 0' 2>/dev/null)
+if [ "$DOC_COUNT" = "3" ] && [ "$PERSISTED" = "true" ] && [ "$VERSION" -gt "0" ]; then
+  ok "inverted info: docs=3, fields=$FIELD_COUNT, tokens=$TOKEN_COUNT, version=$VERSION, persisted=$PERSISTED"
+else
+  fail "inverted info" "docs=$DOC_COUNT fields=$FIELD_COUNT tokens=$TOKEN_COUNT persisted=$PERSISTED v=$VERSION"
+fi
+
+# 27b. 搜索验证倒排正常工作
+RES=$(curl -s -X POST "$GO_ES_URL/$PE_IDX/_search" -H 'Content-Type: application/json' \
+  -d '{"query":{"match":{"title":"fox"}}}')
+N=$(echo "$RES" | jq -r '.hits.total.value // 0' 2>/dev/null)
+if [ "$N" = "3" ]; then
+  ok "搜索 fox 命中 3 (倒排正常)"
+else
+  fail "search after persistence" "got=$N"
+fi
+
+# 27c. 删除 doc 后 version 递增
+V_BEFORE=$VERSION
+curl -s -X DELETE "$GO_ES_URL/$PE_IDX/_doc/1" >/dev/null
+RES=$(curl -s -X GET "$GO_ES_URL/$PE_IDX/_inverted/info")
+V_AFTER=$(echo "$RES" | jq -r '.postings_version // 0' 2>/dev/null)
+if [ "$V_AFTER" -gt "$V_BEFORE" ]; then
+  ok "删除 doc 后 version 递增: $V_BEFORE -> $V_AFTER"
+else
+  fail "version increment" "before=$V_BEFORE after=$V_AFTER"
+fi
+
+# 27d. 强制 rebuild inverted
+RES=$(curl -s -X POST "$GO_ES_URL/$PE_IDX/_inverted/rebuild")
+TOTAL_DOCS=$(echo "$RES" | jq -r '.stats.total_docs // 0' 2>/dev/null)
+REUSED=$(echo "$RES" | jq -r '.stats.reused_tokens // 0' 2>/dev/null)
+TOOK=$(echo "$RES" | jq -r '.stats.duration_ms // 0' 2>/dev/null)
+if [ "$TOTAL_DOCS" = "2" ] && [ "$REUSED" = "2" ]; then
+  ok "force rebuild: total_docs=2, reused=2, took=${TOOK}ms"
+else
+  fail "rebuild" "total=$TOTAL_DOCS reused=$REUSED"
+fi
+
+# 27e. rebuild 后搜索仍工作
+RES=$(curl -s -X POST "$GO_ES_URL/$PE_IDX/_search" -H 'Content-Type: application/json' \
+  -d '{"query":{"match":{"title":"fox"}}}')
+N=$(echo "$RES" | jq -r '.hits.total.value // 0' 2>/dev/null)
+if [ "$N" = "2" ]; then
+  ok "rebuild 后搜索仍命中 2"
+else
+  fail "search after rebuild" "got=$N"
+fi
+
+# 27f. BM25 分数在 rebuild 后仍正确(短字段分高, 但这里都长度相近, 只验证 score>0)
+RES=$(curl -s -X POST "$GO_ES_URL/$PE_IDX/_search" -H 'Content-Type: application/json' \
+  -d '{"query":{"match":{"title":"fox"}}}')
+SCORE=$(echo "$RES" | jq -r '.hits.hits[0]._score // 0' 2>/dev/null)
+if awk "BEGIN{exit !($SCORE > 0)}" 2>/dev/null; then
+  ok "rebuild 后 BM25 score > 0 (=$SCORE)"
+else
+  fail "score after rebuild" "got=$SCORE"
+fi
+
 # ---------- 13. config 加载 + 热更新 ----------
 header "13. 配置文件加载(无配置应不影响启动)"
 # 自研 server 当前没挂 -config 也能起, 这里通过 /metrics 已包含 go_es_build_info 验证

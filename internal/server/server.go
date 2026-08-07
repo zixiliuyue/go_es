@@ -272,5 +272,15 @@ func (s *Server) dispatchIndex(w http.ResponseWriter, r *http.Request, index str
 		s.handleILMExplainForName(w, r, index)
 		return
 	}
+	// /{index}/_inverted/rebuild
+	if len(rest) >= 2 && rest[0] == "_inverted" && rest[1] == "rebuild" && method == http.MethodPost {
+		s.handleRebuildInverted(w, r, index)
+		return
+	}
+	// /{index}/_inverted/info
+	if len(rest) >= 2 && rest[0] == "_inverted" && rest[1] == "info" && method == http.MethodGet {
+		s.handleInvertedInfo(w, r, index)
+		return
+	}
 	http.NotFound(w, r)
 }
