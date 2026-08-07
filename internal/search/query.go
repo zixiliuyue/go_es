@@ -10,13 +10,16 @@ import (
 
 // Query 表示一个查询请求(只关心 query 字段;size/from/sort 在 server 层处理)
 type Query struct {
-	Match       map[string]interface{} `json:"match,omitempty"`
-	MatchPhrase map[string]interface{} `json:"match_phrase,omitempty"`
-	Term        map[string]interface{} `json:"term,omitempty"`
-	Terms       map[string]interface{} `json:"terms,omitempty"`
-	Range       map[string]interface{} `json:"range,omitempty"`
-	Bool        *BoolQuery             `json:"bool,omitempty"`
-	MatchAll    map[string]interface{} `json:"match_all,omitempty"`
+	Match             map[string]interface{} `json:"match,omitempty"`
+	MatchPhrase       map[string]interface{} `json:"match_phrase,omitempty"`
+	MultiMatch        map[string]interface{} `json:"multi_match,omitempty"`
+	QueryString       map[string]interface{} `json:"query_string,omitempty"`
+	SimpleQueryString map[string]interface{} `json:"simple_query_string,omitempty"`
+	Term              map[string]interface{} `json:"term,omitempty"`
+	Terms             map[string]interface{} `json:"terms,omitempty"`
+	Range             map[string]interface{} `json:"range,omitempty"`
+	Bool              *BoolQuery             `json:"bool,omitempty"`
+	MatchAll          map[string]interface{} `json:"match_all,omitempty"`
 }
 
 // BoolQuery bool 组合查询
@@ -43,7 +46,7 @@ func (e *Engine) Match(index string, q *Query) ([]string, error) {
 		return e.allDocs(index), nil
 	}
 	// 空 query(无任何字段) 视为 match_all, 与 ES 行为一致
-	if q.Bool == nil && q.MatchAll == nil && q.Match == nil && q.MatchPhrase == nil && q.Term == nil && q.Terms == nil && q.Range == nil {
+	if q.Bool == nil && q.MatchAll == nil && q.Match == nil && q.MatchPhrase == nil && q.MultiMatch == nil && q.QueryString == nil && q.SimpleQueryString == nil && q.Term == nil && q.Terms == nil && q.Range == nil {
 		return e.allDocs(index), nil
 	}
 
@@ -60,7 +63,7 @@ func (e *Engine) Match(index string, q *Query) ([]string, error) {
 		return e.allDocs(index), nil
 	}
 
-	set, err := e.evalQueryMap(index, map[string]interface{}{"match": q.Match, "match_phrase": q.MatchPhrase, "term": q.Term, "terms": q.Terms, "range": q.Range})
+	set, err := e.evalQueryMap(index, map[string]interface{}{"match": q.Match, "match_phrase": q.MatchPhrase, "multi_match": q.MultiMatch, "query_string": q.QueryString, "simple_query_string": q.SimpleQueryString, "term": q.Term, "terms": q.Terms, "range": q.Range})
 	if err != nil {
 		return nil, err
 	}
@@ -77,7 +80,7 @@ func (e *Engine) allDocs(index string) []string {
 func (e *Engine) evalQueryMap(index string, m map[string]interface{}) (map[string]struct{}, error) {
 	// 按 ES 惯例: 顶层只能有一种 query 类型
 	// 我们取第一个非空字段
-	for _, k := range []string{"match", "match_phrase", "term", "terms", "range", "bool", "match_all"} {
+	for _, k := range []string{"match", "match_phrase", "multi_match", "query_string", "simple_query_string", "term", "terms", "range", "bool", "match_all"} {
 		raw, ok := m[k]
 		if !ok || raw == nil {
 			continue
@@ -93,6 +96,15 @@ func (e *Engine) evalQueryMap(index string, m map[string]interface{}) (map[strin
 		case "match_phrase":
 			fields, _ := raw.(map[string]interface{})
 			return e.evalMatchPhrase(index, fields)
+		case "multi_match":
+			fields, _ := raw.(map[string]interface{})
+			return e.evalMultiMatch(index, fields)
+		case "query_string":
+			fields, _ := raw.(map[string]interface{})
+			return e.evalQueryString(index, fields)
+		case "simple_query_string":
+			fields, _ := raw.(map[string]interface{})
+			return e.evalSimpleQueryString(index, fields)
 		case "term":
 			fields, _ := raw.(map[string]interface{})
 			return e.evalTerm(index, fields)

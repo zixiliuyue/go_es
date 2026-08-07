@@ -851,6 +851,108 @@ else
   fail "search w/ suggest" "hits=$HAS_HITS sug=$HAS_SUG"
 fi
 
+# ---------- 24. multi_match ----------
+header "24. multi_match 跨字段"
+TS_MM=$(date +%s)
+MM_IDX="mm_${TS_MM}"
+curl -s -X PUT "$GO_ES_URL/$MM_IDX" >/dev/null
+curl -s -X PUT "$GO_ES_URL/$MM_IDX/_doc/1" -H 'Content-Type: application/json' -d '{"title":"the quick brown fox","body":"fox runs fast"}' >/dev/null
+curl -s -X PUT "$GO_ES_URL/$MM_IDX/_doc/2" -H 'Content-Type: application/json' -d '{"title":"the lazy dog","body":"dog sleeps"}' >/dev/null
+curl -s -X PUT "$GO_ES_URL/$MM_IDX/_doc/3" -H 'Content-Type: application/json' -d '{"title":"fox and hound","body":"best friends"}' >/dev/null
+
+# 24a. best_fields (默认)
+RES=$(curl -s -X POST "$GO_ES_URL/$MM_IDX/_search" -H 'Content-Type: application/json' \
+  -d '{"query":{"multi_match":{"query":"fox","fields":["title","body"]}}}')
+N=$(echo "$RES" | jq -r '.hits.total.value // 0' 2>/dev/null)
+if [ "$N" = "2" ]; then
+  ok "multi_match fox in [title,body] -> 2 docs (1, 3)"
+else
+  fail "multi_match best_fields" "got=$N"
+fi
+
+# 24b. phrase type
+RES=$(curl -s -X POST "$GO_ES_URL/$MM_IDX/_search" -H 'Content-Type: application/json' \
+  -d '{"query":{"multi_match":{"query":"quick brown","fields":["title"],"type":"phrase"}}}')
+N=$(echo "$RES" | jq -r '.hits.total.value // 0' 2>/dev/null)
+if [ "$N" = "1" ]; then
+  ok "multi_match phrase 'quick brown' -> 1"
+else
+  fail "multi_match phrase" "got=$N"
+fi
+
+# 24c. cross_fields
+RES=$(curl -s -X POST "$GO_ES_URL/$MM_IDX/_search" -H 'Content-Type: application/json' \
+  -d '{"query":{"multi_match":{"query":"fast","fields":["title","body"],"type":"cross_fields"}}}')
+N=$(echo "$RES" | jq -r '.hits.total.value // 0' 2>/dev/null)
+if [ "$N" = "1" ]; then
+  ok "multi_match cross_fields 'fast' -> 1 (in body)"
+else
+  fail "multi_match cross_fields" "got=$N"
+fi
+
+# 24d. phrase_prefix
+RES=$(curl -s -X POST "$GO_ES_URL/$MM_IDX/_search" -H 'Content-Type: application/json' \
+  -d '{"query":{"multi_match":{"query":"quick bro","fields":["title"],"type":"phrase_prefix"}}}')
+N=$(echo "$RES" | jq -r '.hits.total.value // 0' 2>/dev/null)
+if [ "$N" = "1" ]; then
+  ok "multi_match phrase_prefix 'quick bro' -> 1"
+else
+  fail "multi_match phrase_prefix" "got=$N"
+fi
+
+# ---------- 25. query_string ----------
+header "25. query_string 完整 Lucene 语法"
+# 25a. 基础
+RES=$(curl -s -X POST "$GO_ES_URL/$MM_IDX/_search" -H 'Content-Type: application/json' \
+  -d '{"query":{"query_string":{"query":"fox","default_field":"title"}}}')
+N=$(echo "$RES" | jq -r '.hits.total.value // 0' 2>/dev/null)
+if [ "$N" = "2" ]; then ok "query_string fox -> 2"; else fail "query_string basic" "got=$N"; fi
+
+# 25b. +must -must_not
+RES=$(curl -s -X POST "$GO_ES_URL/$MM_IDX/_search" -H 'Content-Type: application/json' \
+  -d '{"query":{"query_string":{"query":"+fox -dog","default_field":"title"}}}')
+N=$(echo "$RES" | jq -r '.hits.total.value // 0' 2>/dev/null)
+if [ "$N" = "2" ]; then ok "query_string +fox -dog -> 2 (1, 3, title 不含 dog)"; else fail "qs must/must_not" "got=$N"; fi
+
+# 25c. 短语
+RES=$(curl -s -X POST "$GO_ES_URL/$MM_IDX/_search" -H 'Content-Type: application/json' \
+  -d '{"query":{"query_string":{"query":"\"quick brown\"","default_field":"title"}}}')
+N=$(echo "$RES" | jq -r '.hits.total.value // 0' 2>/dev/null)
+if [ "$N" = "1" ]; then ok "query_string 'quick brown' 短语 -> 1"; else fail "qs phrase" "got=$N"; fi
+
+# 25d. field:value 字段限定
+RES=$(curl -s -X POST "$GO_ES_URL/$MM_IDX/_search" -H 'Content-Type: application/json' \
+  -d '{"query":{"query_string":{"query":"body:fast","default_field":"title"}}}')
+N=$(echo "$RES" | jq -r '.hits.total.value // 0' 2>/dev/null)
+if [ "$N" = "1" ]; then ok "query_string body:fast -> 1 (doc 1)"; else fail "qs field-scoped" "got=$N"; fi
+
+# 25e. OR
+RES=$(curl -s -X POST "$GO_ES_URL/$MM_IDX/_search" -H 'Content-Type: application/json' \
+  -d '{"query":{"query_string":{"query":"fox OR dog","default_field":"title"}}}')
+N=$(echo "$RES" | jq -r '.hits.total.value // 0' 2>/dev/null)
+if [ "$N" = "3" ]; then ok "query_string fox OR dog -> 3 (1,2,3)"; else fail "qs OR" "got=$N"; fi
+
+# ---------- 26. simple_query_string ----------
+header "26. simple_query_string 简版"
+# 26a. 基础
+RES=$(curl -s -X POST "$GO_ES_URL/$MM_IDX/_search" -H 'Content-Type: application/json' \
+  -d '{"query":{"simple_query_string":{"query":"fox","default_field":"title"}}}')
+N=$(echo "$RES" | jq -r '.hits.total.value // 0' 2>/dev/null)
+if [ "$N" = "2" ]; then ok "simple_query_string fox -> 2"; else fail "sqs basic" "got=$N"; fi
+
+# 26b. +must -must_not
+RES=$(curl -s -X POST "$GO_ES_URL/$MM_IDX/_search" -H 'Content-Type: application/json' \
+  -d '{"query":{"simple_query_string":{"query":"+fox -dog","default_field":"title"}}}')
+N=$(echo "$RES" | jq -r '.hits.total.value // 0' 2>/dev/null)
+if [ "$N" = "2" ]; then ok "sqs +fox -dog -> 2"; else fail "sqs must/must_not" "got=$N"; fi
+
+# 26c. 不抛语法错
+# 即便有乱字符, 只要核心词能命中, 就给结果
+RES=$(curl -s -X POST "$GO_ES_URL/$MM_IDX/_search" -H 'Content-Type: application/json' \
+  -d '{"query":{"simple_query_string":{"query":"((((( +fox","default_field":"title"}}}}')
+N=$(echo "$RES" | jq -r '.hits.total.value // 0' 2>/dev/null)
+if [ "$N" -ge "1" ]; then ok "sqs 语法错也不抛 (got=$N)"; else fail "sqs no-error" "got=$N"; fi
+
 # ---------- 13. config 加载 + 热更新 ----------
 header "13. 配置文件加载(无配置应不影响启动)"
 # 自研 server 当前没挂 -config 也能起, 这里通过 /metrics 已包含 go_es_build_info 验证

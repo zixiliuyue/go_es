@@ -231,6 +231,15 @@ func parseQuery(raw map[string]interface{}) (*search.Query, error) {
 	if v, ok := raw["match_phrase"].(map[string]interface{}); ok {
 		out.MatchPhrase = v
 	}
+	if v, ok := raw["multi_match"].(map[string]interface{}); ok {
+		out.MultiMatch = v
+	}
+	if v, ok := raw["query_string"].(map[string]interface{}); ok {
+		out.QueryString = v
+	}
+	if v, ok := raw["simple_query_string"].(map[string]interface{}); ok {
+		out.SimpleQueryString = v
+	}
 	if v, ok := raw["term"].(map[string]interface{}); ok {
 		out.Term = v
 	}
@@ -348,30 +357,28 @@ func parseAggregationRequests(raw map[string]interface{}) ([]search.AggregationR
 }
 
 // isTextQuery 判定一个 query 是否走 BM25 打分
-// true 条件: 顶层是 match, 或 bool 包了 match 子句
+// true 条件: 顶层是 match / multi_match / query_string / simple_query_string, 或 bool 包了文本子句
 // false 条件: match_all / term / terms / range / 纯 filter(bool)
-// 被 constant_score 包裹时降级为 false(布尔语义)
 func isTextQuery(q *search.Query) bool {
 	if q == nil {
 		return false
 	}
-	if q.Match != nil {
+	if q.Match != nil || q.MatchPhrase != nil || q.MultiMatch != nil || q.QueryString != nil || q.SimpleQueryString != nil {
 		return true
 	}
 	if q.Bool != nil {
-		// 任何 must/should 里出现 match 就视为文本查询
 		for _, c := range q.Bool.Must {
-			if clauseType(c) == "match" {
+			if clauseType(c) == "match" || clauseType(c) == "match_phrase" || clauseType(c) == "multi_match" {
 				return true
 			}
 		}
 		for _, c := range q.Bool.Should {
-			if clauseType(c) == "match" {
+			if clauseType(c) == "match" || clauseType(c) == "match_phrase" || clauseType(c) == "multi_match" {
 				return true
 			}
 		}
 		for _, c := range q.Bool.Filter {
-			if clauseType(c) == "match" {
+			if clauseType(c) == "match" || clauseType(c) == "match_phrase" || clauseType(c) == "multi_match" {
 				return true
 			}
 		}
