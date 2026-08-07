@@ -62,6 +62,8 @@ func (s *Server) doSearch(w http.ResponseWriter, r *http.Request, indices []stri
 
 	allHits := make([]hit, 0)
 	took := time.Now()
+	// 判定是否需要 BM25 打分
+	scored := isTextQuery(q)
 	for _, idx := range indices {
 		ids, err := s.engine.Match(idx, q)
 		if err != nil {
@@ -73,7 +75,12 @@ func (s *Server) doSearch(w http.ResponseWriter, r *http.Request, indices []stri
 		if size == 0 {
 			size = 10
 		}
-		ids = s.applySort(idx, ids, req.Sort)
+		// 如果有 BM25 打分且没显式 sort, 先按 score 降序
+		if scored && len(req.Sort) == 0 {
+			ids = sortByBM25Score(s.engine, idx, q, ids)
+		} else {
+			ids = s.applySort(idx, ids, req.Sort)
+		}
 		if from > len(ids) {
 			continue
 		}
@@ -83,16 +90,28 @@ func (s *Server) doSearch(w http.ResponseWriter, r *http.Request, indices []stri
 		}
 		page := ids[from:end]
 		for _, id := range page {
-			if src, ok := s.engine.GetSource(idx, id); ok {
-				allHits = append(allHits, hit{
-					Index:  idx,
-					ID:     id,
-					Source: src,
-				})
+			src, _ := s.engine.GetSource(idx, id)
+			h := hit{
+				Index:  idx,
+				ID:     id,
+				Source: src,
 			}
+			// 计算 score: 文本查询走 BM25, 其它置 1.0
+			if scored {
+				h.Score = computeHitScore(s.engine, idx, q, id)
+			} else {
+				h.Score = 1.0
+			}
+			allHits = append(allHits, h)
 		}
 	}
 	stdSort.Slice(allHits, func(i, j int) bool {
+		// 文本查询且未指定 sort: 按 _score 降序, 相同分按 index+id 升序
+		if scored {
+			if allHits[i].Score != allHits[j].Score {
+				return allHits[i].Score > allHits[j].Score
+			}
+		}
 		if allHits[i].Index == allHits[j].Index {
 			return allHits[i].ID < allHits[j].ID
 		}
@@ -275,6 +294,142 @@ func parseAggregationRequests(raw map[string]interface{}) ([]search.AggregationR
 		out = append(out, search.AggregationRequest{Key: name, Spec: spec})
 	}
 	return out, nil
+}
+
+// isTextQuery 判定一个 query 是否走 BM25 打分
+// true 条件: 顶层是 match, 或 bool 包了 match 子句
+// false 条件: match_all / term / terms / range / 纯 filter(bool)
+// 被 constant_score 包裹时降级为 false(布尔语义)
+func isTextQuery(q *search.Query) bool {
+	if q == nil {
+		return false
+	}
+	if q.Match != nil {
+		return true
+	}
+	if q.Bool != nil {
+		// 任何 must/should 里出现 match 就视为文本查询
+		for _, c := range q.Bool.Must {
+			if clauseType(c) == "match" {
+				return true
+			}
+		}
+		for _, c := range q.Bool.Should {
+			if clauseType(c) == "match" {
+				return true
+			}
+		}
+		for _, c := range q.Bool.Filter {
+			if clauseType(c) == "match" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// clauseType 提取子句的类型 key (e.g. "match", "term", ...)
+func clauseType(clause map[string]interface{}) string {
+	for k := range clause {
+		return k
+	}
+	return ""
+}
+
+// extractTextClauses 从 query 中提取 (field, queryText) 列表, 用于 BM25 打分
+// 只看顶层 match, 或 bool.must/should 中所有 match 子句
+func extractTextClauses(q *search.Query) []fieldQuery {
+	if q == nil {
+		return nil
+	}
+	if q.Match != nil {
+		out := make([]fieldQuery, 0, len(q.Match))
+		for field, val := range q.Match {
+			if m, ok := val.(map[string]interface{}); ok {
+				if s, ok := m["query"].(string); ok {
+					out = append(out, fieldQuery{Field: field, Query: s})
+					continue
+				}
+			}
+			// 简化: 直接传字符串
+			if s, ok := val.(string); ok {
+				out = append(out, fieldQuery{Field: field, Query: s})
+			}
+		}
+		return out
+	}
+	if q.Bool != nil {
+		out := make([]fieldQuery, 0)
+		for _, c := range q.Bool.Must {
+			if m, ok := c["match"].(map[string]interface{}); ok {
+				for field, val := range m {
+					if s, ok := val.(string); ok {
+						out = append(out, fieldQuery{Field: field, Query: s})
+					} else if mm, ok := val.(map[string]interface{}); ok {
+						if qs, ok := mm["query"].(string); ok {
+							out = append(out, fieldQuery{Field: field, Query: qs})
+						}
+					}
+				}
+			}
+		}
+		return out
+	}
+	return nil
+}
+
+// fieldQuery (field, queryText) 元组
+type fieldQuery struct {
+	Field string
+	Query string
+}
+
+// computeHitScore 算一个 hit 的 BM25 总分(对所有文本子句求和)
+func computeHitScore(e *search.Engine, index string, q *search.Query, docID string) float64 {
+	clauses := extractTextClauses(q)
+	if len(clauses) == 0 {
+		return 1.0
+	}
+	var total float64
+	for _, c := range clauses {
+		total += e.BM25FieldScore(index, c.Field, docID, c.Query)
+	}
+	if total == 0 {
+		// 命中但无文本打分(全 term 子句等), 退回 1.0
+		return 1.0
+	}
+	return total
+}
+
+// sortByBM25Score 按 BM25 得分降序排序 docID 列表
+func sortByBM25Score(e *search.Engine, index string, q *search.Query, ids []string) []string {
+	clauses := extractTextClauses(q)
+	if len(clauses) == 0 {
+		return ids
+	}
+	type scored struct {
+		id    string
+		score float64
+	}
+	out := make([]scored, len(ids))
+	for i, id := range ids {
+		var s float64
+		for _, c := range clauses {
+			s += e.BM25FieldScore(index, c.Field, id, c.Query)
+		}
+		out[i] = scored{id: id, score: s}
+	}
+	stdSort.SliceStable(out, func(i, j int) bool {
+		if out[i].score != out[j].score {
+			return out[i].score > out[j].score
+		}
+		return out[i].id < out[j].id
+	})
+	res := make([]string, len(out))
+	for i, s := range out {
+		res[i] = s.id
+	}
+	return res
 }
 
 // listAllIndexes 通过扫描 meta/ 前缀得到所有索引

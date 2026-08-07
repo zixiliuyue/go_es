@@ -454,6 +454,71 @@ RES=$(curl -s -X POST "$GO_ES_URL/empty_idx_$$/_search" -H 'Content-Type: applic
 assert_status "invalid agg type -> 400" 400 POST "$GO_ES_URL/$AGG_IDX/_search" \
   '{"size":0,"aggs":{"x":{"unknown_type":{"field":"x"}}}}' "application/json"
 
+# ---------- 15. BM25 相关性打分 ----------
+header "15. BM25 相关性打分"
+TS_BM=$(date +%s)
+BM_IDX="bm_${TS_BM}"
+curl -s -X PUT "$GO_ES_URL/$BM_IDX" >/dev/null
+# 4 条文档: 标题长度不同, 共享 "the" 词
+# 预期: doc 1 (短) score 最高, doc 2/3 (中) 接近, doc 4 (无 "the") 不命中
+curl -s -X PUT "$GO_ES_URL/$BM_IDX/_doc/1" -H 'Content-Type: application/json' -d '{"title":"the quick brown fox"}' >/dev/null
+curl -s -X PUT "$GO_ES_URL/$BM_IDX/_doc/2" -H 'Content-Type: application/json' -d '{"title":"the quick brown fox jumps"}' >/dev/null
+curl -s -X PUT "$GO_ES_URL/$BM_IDX/_doc/3" -H 'Content-Type: application/json' -d '{"title":"jumps over the lazy dog"}' >/dev/null
+curl -s -X PUT "$GO_ES_URL/$BM_IDX/_doc/4" -H 'Content-Type: application/json' -d '{"title":"she sells sea shells"}' >/dev/null
+
+# 15a. match 查询: 返回结果按 _score desc
+RES=$(curl -s -X POST "$GO_ES_URL/$BM_IDX/_search" -H 'Content-Type: application/json' \
+  -d '{"query":{"match":{"title":"the"}},"size":10}')
+N=$(echo "$RES" | jq -r '.hits.total.value // 0' 2>/dev/null)
+if [ "$N" = "3" ]; then ok "match the 命中 3 (id 1,2,3)"; else fail "match the" "got=$N body=$RES"; fi
+# 验证 _score 非零
+SCORE1=$(echo "$RES" | jq -r '.hits.hits[] | select(._id=="1") | ._score' 2>/dev/null)
+SCORE2=$(echo "$RES" | jq -r '.hits.hits[] | select(._id=="2") | ._score' 2>/dev/null)
+SCORE3=$(echo "$RES" | jq -r '.hits.hits[] | select(._id=="3") | ._score' 2>/dev/null)
+if awk "BEGIN{exit !($SCORE1 > 0 && $SCORE2 > 0 && $SCORE3 > 0)}" 2>/dev/null; then
+  ok "_score 非零 (1=$SCORE1, 2=$SCORE2, 3=$SCORE3)"
+else
+  fail "_score 非零" "1=$SCORE1 2=$SCORE2 3=$SCORE3"
+fi
+# 验证 doc 1 排在 doc 2/3 之前(字段更短, BM25 更高)
+FIRST_ID=$(echo "$RES" | jq -r '.hits.hits[0]._id // ""' 2>/dev/null)
+if [ "$FIRST_ID" = "1" ]; then
+  ok "doc 1 (短字段) 排第一"
+else
+  fail "BM25 排序" "first=$FIRST_ID, want 1"
+fi
+
+# 15b. doc 4 不出现(不含 "the")
+HAS_4=$(echo "$RES" | jq -r '.hits.hits[] | select(._id=="4") | ._id' 2>/dev/null | wc -l | tr -d ' ')
+if [ "$HAS_4" = "0" ]; then ok "doc 4 (无 'the') 不在结果中"; else fail "doc 4" "should not appear"; fi
+
+# 15c. term 查询不走 BM25(score=1.0)
+RES=$(curl -s -X POST "$GO_ES_URL/$BM_IDX/_search" -H 'Content-Type: application/json' \
+  -d '{"query":{"term":{"title":"she"}},"size":10}')
+TERM_SCORE=$(echo "$RES" | jq -r '.hits.hits[0]._score // 0' 2>/dev/null)
+if [ "$TERM_SCORE" = "1" ] || [ "$TERM_SCORE" = "1.0" ]; then
+  ok "term 查询 score=1.0 (布尔语义)"
+else
+  fail "term score" "got=$TERM_SCORE"
+fi
+
+# 15d. bool 包 match 子句也应走 BM25
+RES=$(curl -s -X POST "$GO_ES_URL/$BM_IDX/_search" -H 'Content-Type: application/json' \
+  -d '{"query":{"bool":{"must":[{"match":{"title":"the"}}]}},"size":10}')
+BOOL_N=$(echo "$RES" | jq -r '.hits.total.value // 0' 2>/dev/null)
+BOOL_SCORE=$(echo "$RES" | jq -r '.hits.hits[0]._score // 0' 2>/dev/null)
+if [ "$BOOL_N" = "3" ] && awk "BEGIN{exit !($BOOL_SCORE > 0)}" 2>/dev/null; then
+  ok "bool+match 子句也走 BM25 (n=3, score=$BOOL_SCORE)"
+else
+  fail "bool+match BM25" "n=$BOOL_N score=$BOOL_SCORE"
+fi
+
+# 15e. 显式 sort 覆盖 BM25 排序
+RES=$(curl -s -X POST "$GO_ES_URL/$BM_IDX/_search" -H 'Content-Type: application/json' \
+  -d '{"query":{"match":{"title":"the"}},"size":10,"sort":[{"_id":"asc"}]}')
+SORT_FIRST=$(echo "$RES" | jq -r '.hits.hits[0]._id // ""' 2>/dev/null)
+if [ "$SORT_FIRST" = "1" ]; then ok "显式 sort 生效 (按 _id asc, first=$SORT_FIRST)"; else fail "sort override" "first=$SORT_FIRST"; fi
+
 # ---------- 13. config 加载 + 热更新 ----------
 header "13. 配置文件加载(无配置应不影响启动)"
 # 自研 server 当前没挂 -config 也能起, 这里通过 /metrics 已包含 go_es_build_info 验证

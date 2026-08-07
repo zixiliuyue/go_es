@@ -28,7 +28,9 @@ type Engine struct {
 	inverted map[string]map[string]map[string]map[string]struct{}
 	// sortedCache: 范围查询加速(数值/字符串字段排序倒排)
 	sortedCache *sortedIndexCache
-	store       *storage.Store
+	// scorer: BM25 打分所需的扩展倒排(field-level 统计 + per-doc tf)
+	scorer *Scorer
+	store  *storage.Store
 }
 
 // New 创建一个新的 Engine
@@ -39,6 +41,7 @@ func New(store *storage.Store) *Engine {
 		docs:        make(map[string]map[string]map[string]interface{}),
 		inverted:    inverted,
 		sortedCache: newSortedIndexCache(),
+		scorer:      newScorer(),
 		store:       store,
 	}
 	// 注入 source 查询给聚合包使用(避免 search 包内部循环 import)
@@ -77,6 +80,7 @@ func (e *Engine) IndexDoc(index, id string, doc map[string]interface{}) {
 
 // indexField 对单个字段做分词+倒排登记
 // 字段类型推断: 字符串走分词,其它类型按 string 化后整段写入倒排(term 匹配)
+// 同时把 tokens 推给 scorer, 用于 BM25 统计
 func (e *Engine) indexField(index, id, field string, raw interface{}) {
 	if e.inverted[index] == nil {
 		e.inverted[index] = make(map[string]map[string]map[string]struct{})
@@ -85,12 +89,15 @@ func (e *Engine) indexField(index, id, field string, raw interface{}) {
 		e.inverted[index][field] = make(map[string]map[string]struct{})
 	}
 	if str, ok := raw.(string); ok {
-		for _, tok := range tokenize(str) {
+		toks := tokenize(str)
+		for _, tok := range toks {
 			if e.inverted[index][field][tok] == nil {
 				e.inverted[index][field][tok] = make(map[string]struct{})
 			}
 			e.inverted[index][field][tok][id] = struct{}{}
 		}
+		// 推 scorer(字符串字段, BM25 适用)
+		e.scorer.onIndexDoc(index, field, id, toks)
 		return
 	}
 	tok := stringify(raw)
@@ -98,6 +105,7 @@ func (e *Engine) indexField(index, id, field string, raw interface{}) {
 		e.inverted[index][field][tok] = make(map[string]struct{})
 	}
 	e.inverted[index][field][tok][id] = struct{}{}
+	// 非字符串字段(数字/布尔): 不参与 BM25 文本打分
 }
 
 // DeleteDoc 删除一个文档
@@ -117,13 +125,14 @@ func (e *Engine) DeleteDoc(index, id string) {
 	}
 }
 
-// unindexField 从倒排中移除 docID
+// unindexField 从倒排中移除 docID, 同时通知 scorer 撤销 BM25 计数
 func (e *Engine) unindexField(index, id, field string, raw interface{}) {
 	if e.inverted[index] == nil || e.inverted[index][field] == nil {
 		return
 	}
 	if str, ok := raw.(string); ok {
-		for _, tok := range tokenize(str) {
+		toks := tokenize(str)
+		for _, tok := range toks {
 			if set, ok := e.inverted[index][field][tok]; ok {
 				delete(set, id)
 				if len(set) == 0 {
@@ -131,6 +140,8 @@ func (e *Engine) unindexField(index, id, field string, raw interface{}) {
 				}
 			}
 		}
+		// 通知 scorer 撤销
+		e.scorer.onDeleteDoc(index, field, id, toks)
 		return
 	}
 	tok := stringify(raw)
@@ -260,6 +271,38 @@ func (e *Engine) AllIDs(index string) []string {
 		}
 	}
 	return ids
+}
+
+// BM25FieldScore 计算 docID 在某字段上对 query 字符串的 BM25 得分
+// 缺失字段或非字符串字段返回 0
+// 若字段统计未建好(totalDocs=0), 自动重建一次
+func (e *Engine) BM25FieldScore(index, field, docID, query string) float64 {
+	stats := e.ensureFieldStats(index, field)
+	if stats == nil || stats.TotalDocs == 0 {
+		return 0
+	}
+	toks := tokenize(query)
+	return BM25Score(stats.TotalDocs, stats.AvgFieldLen, toks, field, e.scorer, index, docID)
+}
+
+// ensureFieldStats 取得字段统计; 若缺失,触发一次重建后返回
+func (e *Engine) ensureFieldStats(index, field string) *FieldStats {
+	e.scorer.mu.RLock()
+	if st, ok := e.scorer.fieldStats[index]; ok {
+		if s, ok := st[field]; ok {
+			e.scorer.mu.RUnlock()
+			return s
+		}
+	}
+	e.scorer.mu.RUnlock()
+	// 重建
+	e.scorer.rebuildFieldStats()
+	e.scorer.mu.RLock()
+	defer e.scorer.mu.RUnlock()
+	if e.scorer.fieldStats[index] == nil {
+		return nil
+	}
+	return e.scorer.fieldStats[index][field]
 }
 
 // 工具函数
