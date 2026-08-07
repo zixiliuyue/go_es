@@ -9,6 +9,8 @@ import (
 
 // handleMetrics GET /metrics
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	// 抓取前先收集 gouge 统计
+	s.metrics.Collect(s)
 	h := promhttp.HandlerFor(s.metrics.Registry(), promhttp.HandlerOpts{
 		// 抓取端点本身的错误是 5xx, 否则 200
 		ErrorHandling: promhttp.ContinueOnError,

@@ -1509,6 +1509,92 @@ else
   fail "status cache" "elapsed=$ELAPSED ms"
 fi
 
+# ---------- 34. Prometheus 指标扩展 ----------
+header "34. Prometheus 指标扩展"
+# 34a. /metrics 抓取所有新增指标
+RES=$(curl -s -X GET "$GO_ES_URL/metrics")
+# 找纯数据行(非 HELP/TYPE)
+HAS_WC=$(echo "$RES" | grep -E "^go_es_wc_in_flight " | wc -l | tr -d ' ')
+HAS_AL_W=$(echo "$RES" | grep -E "^go_es_accesslog_written_total" | wc -l | tr -d ' ')
+HAS_AL_D=$(echo "$RES" | grep -E "^go_es_accesslog_dropped_total" | wc -l | tr -d ' ')
+HAS_SEG_T=$(echo "$RES" | grep -E "^go_es_segment_total " | wc -l | tr -d ' ')
+HAS_SEG_F=$(echo "$RES" | grep -E "^go_es_segment_flushes_total" | wc -l | tr -d ' ')
+HAS_SEG_B=$(echo "$RES" | grep -E "^go_es_segment_bytes_total" | wc -l | tr -d ' ')
+HAS_OC=$(echo "$RES" | grep -E "^go_es_optimistic_conflicts_total" | wc -l | tr -d ' ')
+HAS_RBAC_AF=$(echo "$RES" | grep -E "^go_es_rbac_auth_failures_total" | wc -l | tr -d ' ')
+HAS_RBAC_FB=$(echo "$RES" | grep -E "^go_es_rbac_forbidden_total" | wc -l | tr -d ' ')
+if [ "$HAS_WC" -ge "1" ] && [ "$HAS_AL_W" -ge "1" ] && [ "$HAS_SEG_T" -ge "1" ] && [ "$HAS_OC" -ge "1" ] && [ "$HAS_RBAC_AF" -ge "1" ]; then
+  ok "9 个新增指标全部暴露 (wc/accesslog/segment/oc/rbac)"
+else
+  fail "metrics presence" "wc=$HAS_WC al_w=$HAS_AL_W seg_t=$HAS_SEG_T oc=$HAS_OC rbac_af=$HAS_RBAC_AF"
+fi
+
+# 34b. 触发一次乐观锁冲突, 验证计数增加
+TS_OC=$(date +%s)
+OC_IDX="met_oc_${TS_OC}"
+curl -s -X PUT "$GO_ES_URL/$OC_IDX" >/dev/null
+curl -s -X PUT "$GO_ES_URL/$OC_IDX/_doc/1" -H 'Content-Type: application/json' -d '{"a":1}' >/dev/null
+# if_seq_no=1 (匹配) 成功
+curl -s -X PUT "$GO_ES_URL/$OC_IDX/_doc/1?if_seq_no=1" -H 'Content-Type: application/json' -d '{"a":2}' >/dev/null
+# if_seq_no=1 (stale) 冲突
+curl -s -X PUT "$GO_ES_URL/$OC_IDX/_doc/1?if_seq_no=1" -H 'Content-Type: application/json' -d '{"a":3}' >/dev/null
+RES=$(curl -s -X GET "$GO_ES_URL/metrics")
+OC_VAL=$(echo "$RES" | grep -E "^go_es_optimistic_conflicts_total\{.*write" | head -1 | awk '{print $2}' 2>/dev/null)
+if [ -n "$OC_VAL" ] && [ "$OC_VAL" != "0" ]; then
+  ok "optimistic_conflicts_total=$OC_VAL (1 次冲突后)"
+else
+  fail "oc counter" "got=$OC_VAL"
+fi
+
+# 34c. wc_total_batches 至少 0
+WC_BATCHES=$(echo "$RES" | grep -E "^go_es_wc_batches_total" | head -1 | awk '{print $2}' 2>/dev/null)
+if [ -n "$WC_BATCHES" ]; then
+  ok "wc_batches_total=$WC_BATCHES"
+else
+  fail "wc batches" "got=$WC_BATCHES"
+fi
+
+# 34d. accesslog_written 至少 1 (有请求)
+AL_W=$(echo "$RES" | grep -E "^go_es_accesslog_written_total" | head -1 | awk '{print $2}' 2>/dev/null)
+if [ -n "$AL_W" ] && [ "$AL_W" != "0" ]; then
+  ok "accesslog_written_total=$AL_W (有请求)"
+else
+  fail "al written" "got=$AL_W"
+fi
+
+# 34e. 触发 segment flush, 验证 segment_total 增加
+TS_SEG=$(date +%s)
+SEG_IDX="met_seg_${TS_SEG}"
+curl -s -X PUT "$GO_ES_URL/$SEG_IDX" >/dev/null
+curl -s -X PUT "$GO_ES_URL/$SEG_IDX/_doc/1" -H 'Content-Type: application/json' -d '{"title":"x"}' >/dev/null
+curl -s -X POST "$GO_ES_URL/$SEG_IDX/_segment/flush" >/dev/null
+RES=$(curl -s -X GET "$GO_ES_URL/metrics")
+SEG_T=$(echo "$RES" | grep -E "^go_es_segment_total " | head -1 | awk '{print $2}' 2>/dev/null)
+if [ -n "$SEG_T" ] && [ "$SEG_T" -ge "1" ]; then
+  ok "segment_total=$SEG_T (flush 后)"
+else
+  fail "segment total" "got=$SEG_T"
+fi
+
+# 34f. rbac_forbidden_total 至少 0 (无认证环境)
+RBAC_FB=$(echo "$RES" | grep -E "^go_es_rbac_forbidden_total" | head -1 | awk '{print $2}' 2>/dev/null)
+if [ -n "$RBAC_FB" ]; then
+  ok "rbac_forbidden_total=$RBAC_FB (有定义)"
+else
+  fail "rbac forbidden" "no metric"
+fi
+
+# 34g. start_time_seconds 是合理时间戳
+STS=$(echo "$RES" | grep -E "^go_es_start_time_seconds " | head -1 | awk '{print $2}' 2>/dev/null)
+# 浮点数 -> 整数 (用 awk 算 int)
+STS_INT=$(echo "$STS" | awk '{print int($1)}' 2>/dev/null)
+NOW=$(date +%s)
+if [ -n "$STS_INT" ] && [ "$STS_INT" -ge "0" ] && [ "$STS_INT" -le "$((NOW + 100))" ] && [ "$STS_INT" -ge "$((NOW - 3600))" ]; then
+  ok "start_time_seconds=$STS (合理范围)"
+else
+  fail "start time" "sts=$STS int=$STS_INT now=$NOW"
+fi
+
 # ---------- 13. config 加载 + 热更新 ----------
 header "13. 配置文件加载(无配置应不影响启动)"
 # 自研 server 当前没挂 -config 也能起, 这里通过 /metrics 已包含 go_es_build_info 验证

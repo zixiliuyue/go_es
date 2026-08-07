@@ -187,6 +187,9 @@ func (s *Server) applyWrite(op writeOp) (DocMeta, int, map[string]interface{}) {
 	newMeta, err := NextMeta(currentPtr, currentExists, op.IfSeqNo, op.IfPrimaryTerm, op.Version, vType)
 	if err != nil {
 		if errors.Is(err, ErrVersionConflict) {
+			if s.metrics != nil {
+				s.metrics.IncOptimisticConflict("write", op.OpType)
+			}
 			return currentMeta, 409, versionConflictError(currentMeta.SeqNo, currentMeta.PrimaryTerm, op.IfSeqNo, op.IfPrimaryTerm)
 		}
 		return currentMeta, 400, map[string]interface{}{
