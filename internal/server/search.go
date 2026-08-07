@@ -176,6 +176,17 @@ func (s *Server) doSearch(w http.ResponseWriter, r *http.Request, indices []stri
 			resp["aggregations"] = map[string]interface{}(aggRes)
 		}
 	}
+	// suggest: 在 hits/aggregations 计算完后附加
+	if len(req.Suggest) > 0 {
+		// 跨索引合并: 把每个 idx 单独跑, 然后按 suggest 名字合并
+		merged := make(map[string][]search.SuggestResult, len(req.Suggest))
+		for _, idx := range indices {
+			s.attachSuggestToResponseHelper(idx, req.Suggest, merged)
+		}
+		if len(merged) > 0 {
+			resp["suggest"] = merged
+		}
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -194,6 +205,8 @@ type searchRequest struct {
 	Highlight map[string]interface{} `json:"highlight,omitempty"`
 	// track_total_hits: true=全量统计, false=截断, int=上限
 	TrackTotalHits interface{} `json:"track_total_hits,omitempty"`
+	// suggest: 形如 {"<name>": {"text": "...", "term": {...} | "completion": {...} | "prefix": {...}}}
+	Suggest map[string]interface{} `json:"suggest,omitempty"`
 }
 
 // hit 单条命中
@@ -214,6 +227,9 @@ func parseQuery(raw map[string]interface{}) (*search.Query, error) {
 	out := &search.Query{}
 	if v, ok := raw["match"].(map[string]interface{}); ok {
 		out.Match = v
+	}
+	if v, ok := raw["match_phrase"].(map[string]interface{}); ok {
+		out.MatchPhrase = v
 	}
 	if v, ok := raw["term"].(map[string]interface{}); ok {
 		out.Term = v

@@ -745,6 +745,112 @@ else
   fail "track_total_hits=false" "total=$TOTAL rel=$REL"
 fi
 
+# ---------- 21. match_phrase ----------
+header "21. match_phrase 短语匹配"
+TS_MP=$(date +%s)
+MP_IDX="mp_${TS_MP}"
+curl -s -X PUT "$GO_ES_URL/$MP_IDX" >/dev/null
+curl -s -X PUT "$GO_ES_URL/$MP_IDX/_doc/1" -H 'Content-Type: application/json' -d '{"title":"the quick brown fox"}' >/dev/null
+curl -s -X PUT "$GO_ES_URL/$MP_IDX/_doc/2" -H 'Content-Type: application/json' -d '{"title":"the quick brown fox jumps"}' >/dev/null
+curl -s -X PUT "$GO_ES_URL/$MP_IDX/_doc/3" -H 'Content-Type: application/json' -d '{"title":"jumps over the lazy dog"}' >/dev/null
+
+# 21a. "quick brown" 顺序短语 -> 命中 1, 2
+RES=$(curl -s -X POST "$GO_ES_URL/$MP_IDX/_search" -H 'Content-Type: application/json' \
+  -d '{"query":{"match_phrase":{"title":"quick brown"}}}')
+N=$(echo "$RES" | jq -r '.hits.total.value // 0' 2>/dev/null)
+if [ "$N" = "2" ]; then
+  ok "match_phrase 'quick brown' 命中 2 (id 1, 2)"
+else
+  fail "match_phrase" "got=$N"
+fi
+
+# 21b. "brown quick" 倒序 -> 不命中(顺序敏感)
+RES=$(curl -s -X POST "$GO_ES_URL/$MP_IDX/_search" -H 'Content-Type: application/json' \
+  -d '{"query":{"match_phrase":{"title":"brown quick"}}}')
+N=$(echo "$RES" | jq -r '.hits.total.value // 0' 2>/dev/null)
+if [ "$N" = "0" ]; then
+  ok "match_phrase 'brown quick' 倒序不命中"
+else
+  fail "match_phrase order" "got=$N (expect 0)"
+fi
+
+# 21c. match_phrase 也走 BM25 打分(短字段分高)
+RES=$(curl -s -X POST "$GO_ES_URL/$MP_IDX/_search" -H 'Content-Type: application/json' \
+  -d '{"query":{"match_phrase":{"title":"quick brown"}}}')
+SCORE=$(echo "$RES" | jq -r '.hits.hits[0]._score // 0' 2>/dev/null)
+if awk "BEGIN{exit !($SCORE > 0)}" 2>/dev/null; then
+  ok "match_phrase _score > 0 (=$SCORE)"
+else
+  fail "match_phrase score" "got=$SCORE"
+fi
+
+# ---------- 22. _suggest ----------
+header "22. _suggest 端点"
+TS_SG=$(date +%s)
+SG_IDX="sg_${TS_SG}"
+curl -s -X PUT "$GO_ES_URL/$SG_IDX" >/dev/null
+curl -s -X PUT "$GO_ES_URL/$SG_IDX/_doc/1" -H 'Content-Type: application/json' -d '{"title":"the quick brown fox"}' >/dev/null
+curl -s -X PUT "$GO_ES_URL/$SG_IDX/_doc/2" -H 'Content-Type: application/json' -d '{"title":"the quick brown fox jumps"}' >/dev/null
+curl -s -X PUT "$GO_ES_URL/$SG_IDX/_doc/3" -H 'Content-Type: application/json' -d '{"title":"jumps over the lazy dog"}' >/dev/null
+curl -s -X PUT "$GO_ES_URL/$SG_IDX/_doc/4" -H 'Content-Type: application/json' -d '{"title":"the apple pie"}' >/dev/null
+
+# 22a. term suggester: 找 typo "quik" -> quick
+RES=$(curl -s -X POST "$GO_ES_URL/$SG_IDX/_suggest" -H 'Content-Type: application/json' \
+  -d '{"s1":{"text":"quik","term":{"field":"title","max_edits":2}}}')
+SUG_TEXT=$(echo "$RES" | jq -r '.s1[0].options[0].text // ""' 2>/dev/null)
+if [ "$SUG_TEXT" = "quick" ]; then
+  ok "term suggester: typo 'quik' -> 'quick'"
+else
+  fail "term suggester" "got=$SUG_TEXT"
+fi
+
+# 22b. completion suggester: prefix "qu" -> quick
+RES=$(curl -s -X POST "$GO_ES_URL/$SG_IDX/_suggest" -H 'Content-Type: application/json' \
+  -d '{"s1":{"text":"qu","completion":{"field":"title","size":5}}}')
+COMP_HAS=$(echo "$RES" | jq -r '.s1[0].options | map(select(.text=="quick")) | length' 2>/dev/null)
+if [ "$COMP_HAS" -ge "1" ]; then
+  ok "completion suggester: prefix 'qu' 包含 'quick'"
+else
+  fail "completion suggester" "no quick found"
+fi
+
+# 22c. prefix suggester: prefix "ap" -> apple
+RES=$(curl -s -X POST "$GO_ES_URL/$SG_IDX/_suggest" -H 'Content-Type: application/json' \
+  -d '{"s1":{"text":"ap","prefix":{"field":"title","size":5}}}')
+PF_HAS=$(echo "$RES" | jq -r '.s1[0].options | map(select(.text=="apple")) | length' 2>/dev/null)
+if [ "$PF_HAS" -ge "1" ]; then
+  ok "prefix suggester: prefix 'ap' 包含 'apple'"
+else
+  fail "prefix suggester" "no apple"
+fi
+
+# 22d. 空 suggest -> 400
+assert_status "_suggest empty -> 400" 400 POST "$GO_ES_URL/$SG_IDX/_suggest" '{}' "application/json"
+
+# 22e. 多个 suggester 一起跑
+RES=$(curl -s -X POST "$GO_ES_URL/$SG_IDX/_suggest" -H 'Content-Type: application/json' \
+  -d '{"s1":{"text":"qu","completion":{"field":"title"}},"s2":{"text":"ap","prefix":{"field":"title"}}}')
+N1=$(echo "$RES" | jq -r '.s1 | length' 2>/dev/null)
+N2=$(echo "$RES" | jq -r '.s2 | length' 2>/dev/null)
+if [ "$N1" -ge "1" ] && [ "$N2" -ge "1" ]; then
+  ok "多 suggester 并行 (s1=$N1, s2=$N2)"
+else
+  fail "multi suggest" "s1=$N1 s2=$N2"
+fi
+
+# ---------- 23. _search with suggest ----------
+header "23. _search 体内 suggest"
+# 23a. 在 search 请求里带 suggest
+RES=$(curl -s -X POST "$GO_ES_URL/$SG_IDX/_search" -H 'Content-Type: application/json' \
+  -d '{"query":{"match_all":{}},"suggest":{"s1":{"text":"qu","prefix":{"field":"title"}}}}')
+HAS_HITS=$(echo "$RES" | jq -r '.hits.total.value // 0' 2>/dev/null)
+HAS_SUG=$(echo "$RES" | jq -r '.suggest.s1 | length // 0' 2>/dev/null)
+if [ "$HAS_HITS" -ge "4" ] && [ "$HAS_SUG" -ge "1" ]; then
+  ok "_search 体内 suggest: hits=$HAS_HITS, suggest.s1=$HAS_SUG"
+else
+  fail "search w/ suggest" "hits=$HAS_HITS sug=$HAS_SUG"
+fi
+
 # ---------- 13. config 加载 + 热更新 ----------
 header "13. 配置文件加载(无配置应不影响启动)"
 # 自研 server 当前没挂 -config 也能起, 这里通过 /metrics 已包含 go_es_build_info 验证

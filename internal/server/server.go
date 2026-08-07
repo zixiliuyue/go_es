@@ -247,6 +247,11 @@ func (s *Server) dispatchIndex(w http.ResponseWriter, r *http.Request, index str
 		s.handleSearchForNamePattern(w, r, index)
 		return
 	}
+	// /{index}/_suggest
+	if len(rest) >= 1 && rest[0] == "_suggest" && method == http.MethodPost {
+		s.handleSuggest(w, r, index)
+		return
+	}
 	// /{index}/_update_by_query
 	if len(rest) >= 1 && rest[0] == "_update_by_query" && method == http.MethodPost {
 		s.handleUpdateByQuery(w, r, index)
