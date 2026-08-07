@@ -61,6 +61,8 @@ type Server struct {
 	// HealthChecker 健康检查
 	healthChecker *HealthChecker
 	healthCheckerMu sync.Mutex
+	// 快照目录
+	snapDir string
 }
 
 // ServerOptions 构造服务端的可选配置
@@ -201,6 +203,8 @@ func (s *Server) buildRouter() *router {
 	rt.addExact("PUT", []string{"_snapshot", "{repo}", "{snap}"}, s.handleSnapshotCreate)
 	rt.addExact("GET", []string{"_snapshot", "{repo}", "{snap}"}, s.handleSnapshotGet)
 	rt.addExact("DELETE", []string{"_snapshot", "{repo}", "{snap}"}, s.handleSnapshotDelete)
+	// /_snapshot/{repo}/{snap}/_restore  POST 恢复
+	rt.addExact("POST", []string{"_snapshot", "{repo}", "{snap}", "_restore"}, s.handleSnapshotRestore)
 
 	// /_cat/nodes 与 /_cat/indices
 	rt.addExact("GET", []string{"_cat", "nodes"}, s.handleCatNodes)

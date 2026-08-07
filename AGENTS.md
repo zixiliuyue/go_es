@@ -315,6 +315,14 @@ watch_interval: 5s          # 轮询间隔(go duration)
   - 空态: history 为空时显示"暂无数据"
   - 单元测试:`internal/server/extensions2_test.go::TestUI_ChartSurface` 11 个 hook 字符串 + 验证 pushHistory 函数体内含 `renderHistoryChart()` 调用
   - e2e:`scripts/e2e-tests.sh` section 9g,8 条断言(SVG/挂载点/CSS/柱元素/双柱颜色/空态文案);81/81 全过
+- 2026-08-07: 完成 #16 真实快照与恢复 — **NDJSON 文件级快照 + 跨 store 恢复 + 完整性校验**:
+  - `internal/server/extras.go::handleSnapshotCreate`:遍历 `storage.ScanAllKeys` 导出全量数据到 NDJSON 文件;过滤 `snapshot/`、`doc-tf/`、`postings-version/`、`doc-meta/` 前缀;文件末尾写内嵌 meta 行(`__snapshot_meta__`,含 version/doc_count/key_count/created_at);写 store 侧元数据含 `doc_count`
+  - `internal/server/extras.go::handleSnapshotRestore`:读 NDJSON 文件跳过 `__snapshot_meta__` 行,用 `PutRaw` 写回目标 store;`engine.LoadAll()` 重建倒排;从 meta 行取 `expected_doc_count` 与 `restored_docs` 比对;响应体含 `restored`/`restored_docs`/`expected_docs`
+  - `internal/server/extras.go::handleSnapshotDelete`:删除快照元数据 + 物理 NDJSON 文件(`os.Remove`)
+  - `internal/server/server.go`:注册 `POST /_snapshot/{repo}/{snap}/_restore`;Server 加 `snapDir` 字段;默认路径 `dataDir/snapshots`
+  - `internal/storage/store.go`:新增 `Dir()` 方法暴露数据目录 + `ScanAllKeys` 迭代全量 key;新增 `PutRaw` 写原始字节
+  - 单元测试:`internal/server/snapshot_test.go` 10 个用例:路径推导/创建恢复/元数据缺失恢复/无仓库/文件格式/删除元数据+文件/恢复后可搜索/恢复文档计数
+  - e2e:`scripts/e2e-tests.sh` section 35(35a~35m):建库→写数据→创建快照→验证元信息→删除原数据→恢复→验证 5 docs 全恢复→搜索命中→文档内容完整→删除快照→已删除快照 404→已删除快照恢复 404→删仓库
 
 ### 已实现完整覆盖
 - 倒排索引查询引擎(range 已倒排化, term/match 原本就是倒排)
@@ -328,6 +336,7 @@ watch_interval: 5s          # 轮询间隔(go duration)
 - 写合并(bulk 路径,单 doc 写仍走原路径)
 - reindex 进度精细化(batch=100) + 取消回滚
 - YAML 配置 schema 校验(启动期, 数据驱动, 错误聚合)
+- **真实快照与恢复**(#16, NDJSON 文件级, 跨 store 恢复, 完整性校验, 物理文件删除)
 
 ### 待办(更长期)
 (所有本期工作已完成; 后续按需增量)

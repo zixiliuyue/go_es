@@ -31,6 +31,8 @@ type Store struct {
 	db *badger.DB
 	// mu 保护 SDK 内部对 BadgerDB 视图外的可变状态
 	mu sync.Mutex
+	// dataDir 数据目录(用于快照等扩展); 内存模式为 ""
+	dataDir string
 }
 
 // Open 打开(创建)一个 BadgerDB 实例
@@ -55,7 +57,32 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open badger: %w", err)
 	}
-	return &Store{db: db}, nil
+	return &Store{db: db, dataDir: path}, nil
+}
+
+// Dir 取得数据目录(内存模式为 "")
+func (s *Store) Dir() string { return s.dataDir }
+
+// ScanAllKeys 遍历所有 key/value(快照等用)
+// fn 返回非 nil error 立即终止
+func (s *Store) ScanAllKeys(fn func(key, value []byte) error) error {
+	return s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		for it.Rewind(); it.Valid(); it.Next() {
+			item := it.Item()
+			k := item.KeyCopy(nil)
+			v, err := item.ValueCopy(nil)
+			if err != nil {
+				return err
+			}
+			if err := fn(k, v); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // Close 关闭数据库

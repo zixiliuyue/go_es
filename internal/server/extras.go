@@ -2,16 +2,40 @@
 package server
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/zixiliuyue/go_es/internal/storage"
+	"go.uber.org/zap"
 )
+
+// snapshotPath 计算快照文件路径
+//   - 默认 {data_dir}/snapshots/{repo}/{snap}.ndjson
+//   - 由 Server.snapshotPath() 提供
+func (s *Server) snapshotPath(repo, snap string) string {
+	base := s.snapshotsDir()
+	return filepath.Join(base, repo, snap+".ndjson")
+}
+
+// snapshotsDir 取得快照根目录
+func (s *Server) snapshotsDir() string {
+	if s.snapDir != "" {
+		return s.snapDir
+	}
+	// 默认放 storage 目录下的 snapshots
+	if s.store != nil {
+		return filepath.Join(s.store.Dir(), "snapshots")
+	}
+	return "./snapshots"
+}
 
 // 索引模板
 
@@ -485,17 +509,185 @@ func (s *Server) handleSnapshotCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "repository_not_found_exception", "repo not found", repo)
 		return
 	}
+	// 真实快照: 遍历 storage 所有 key, 序列化到 NDJSON 文件
+	snapPath := s.snapshotPath(repo, snap)
+	if err := os.MkdirAll(filepath.Dir(snapPath), 0755); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", err.Error(), "")
+		return
+	}
+	f, err := os.Create(snapPath)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", err.Error(), "")
+		return
+	}
+	defer f.Close()
+	enc := json.NewEncoder(f)
+
+	start := time.Now()
+	docCount := 0
+	keyCount := 0
+	err = s.store.ScanAllKeys(func(key, value []byte) error {
+		// 不导出 snapshot 元数据 / 仓库元数据自身
+		if bytes.HasPrefix(key, []byte("snapshot/")) {
+			return nil
+		}
+		// 不导出倒排索引分词结果 (恢复时重建)
+		if bytes.HasPrefix(key, []byte("doc-tf/")) {
+			return nil
+		}
+		// 不导出版本号/倒排缓存
+		if bytes.HasPrefix(key, []byte("postings-version/")) || bytes.HasPrefix(key, []byte("doc-meta/")) {
+			return nil
+		}
+		// value 可能是 JSON 对象或 []byte, 尝试解析
+		var v interface{}
+		if err := json.Unmarshal(value, &v); err == nil {
+			row := map[string]interface{}{
+				"key":   string(key),
+				"value": v,
+			}
+			if err := enc.Encode(row); err != nil {
+				return err
+			}
+			keyCount++
+			if bytes.HasPrefix(key, []byte("doc/")) {
+				docCount++
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", err.Error(), "")
+		return
+	}
+	// 写内嵌 meta 行, 便于跨 store 恢复时验证完整性
+	metaRow := map[string]interface{}{
+		"key":   "__snapshot_meta__",
+		"value": map[string]interface{}{
+			"version":    1,
+			"doc_count":  docCount,
+			"key_count":  keyCount,
+			"created_at": start.UTC().Format(time.RFC3339),
+		},
+	}
+	if err := enc.Encode(metaRow); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", err.Error(), "")
+		return
+	}
+	// 写 store 元数据
 	meta := map[string]interface{}{
 		"state":      "SUCCESS",
-		"start_time": time.Now().UTC().Format(time.RFC3339),
+		"start_time": start.UTC().Format(time.RFC3339),
 		"end_time":   time.Now().UTC().Format(time.RFC3339),
 		"indices":    s.listAllIndexes(),
+		"doc_count":  docCount,
+		"file":       snapPath,
 	}
 	if err := s.store.Put(storage.SnapshotKey(repo, snap), meta); err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error(), "")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"accepted": true})
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"accepted":   true,
+		"doc_count":  docCount,
+		"start_time": meta["start_time"],
+		"end_time":   meta["end_time"],
+	})
+}
+
+// handleSnapshotRestore POST /_snapshot/{repo}/{snap}/_restore
+// 读取快照文件, 把 key/value 写回 store
+// 快照文件自包含, 不依赖 store 中的元数据, 可跨 store 恢复
+func (s *Server) handleSnapshotRestore(w http.ResponseWriter, r *http.Request) {
+	repo := pathSegment(r, 1)
+	snap := pathSegment(r, 2)
+	if repo == "" || snap == "" {
+		writeError(w, http.StatusBadRequest, "illegal_argument_exception", "repo and snap required", "")
+		return
+	}
+	snapPath := s.snapshotPath(repo, snap)
+	if _, err := os.Stat(snapPath); err != nil {
+		writeError(w, http.StatusNotFound, "snapshot_not_found_exception", "snapshot file not found: "+err.Error(), snap)
+		return
+	}
+	f, err := os.Open(snapPath)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", err.Error(), "")
+		return
+	}
+	defer f.Close()
+	dec := json.NewDecoder(f)
+	restored := 0
+	restoredDocs := 0
+	expectedDocCount := 0
+	for {
+		var row map[string]interface{}
+		if err := dec.Decode(&row); err != nil {
+			if err.Error() == "EOF" {
+				break
+			}
+			writeError(w, http.StatusInternalServerError, "internal_error", "decode: "+err.Error(), "")
+			return
+		}
+		keyStr, _ := row["key"].(string)
+		value := row["value"]
+		if keyStr == "" {
+			continue
+		}
+		// 跳过内嵌 meta 行, 提取 doc_count
+		if keyStr == "__snapshot_meta__" {
+			if metaVal, ok := value.(map[string]interface{}); ok {
+				if dc, ok := metaVal["doc_count"].(float64); ok {
+					expectedDocCount = int(dc)
+				}
+			}
+			continue
+		}
+		// value 转 []byte
+		var vraw []byte
+		switch vv := value.(type) {
+		case nil:
+			continue
+		case string:
+			vraw = []byte(vv)
+		default:
+			vraw, _ = json.Marshal(value)
+		}
+		if err := s.store.PutRaw([]byte(keyStr), vraw); err != nil {
+			writeError(w, http.StatusInternalServerError, "internal_error", err.Error(), "")
+			return
+		}
+		restored++
+		if bytes.HasPrefix([]byte(keyStr), []byte("doc/")) {
+			restoredDocs++
+		}
+	}
+	// 重建 inverted
+	if s.engine != nil {
+		if err := s.engine.LoadAll(); err != nil {
+			s.logger.Warn("restore: rebuild inverted failed", zap.Error(err))
+		}
+	}
+	// 验证完整性
+	if expectedDocCount > 0 && restoredDocs != expectedDocCount {
+		s.logger.Warn("restore: doc count mismatch",
+			zap.Int("expected", expectedDocCount),
+			zap.Int("restored", restoredDocs))
+	}
+	// 写入快照元数据到目标 store
+	_ = s.store.Put(storage.SnapshotKey(repo, snap), map[string]interface{}{
+		"state":         "RESTORED",
+		"restored":      restored,
+		"restored_docs": restoredDocs,
+		"expected_docs": expectedDocCount,
+		"file":          snapPath,
+	})
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"accepted":      true,
+		"restored":      restored,
+		"restored_docs": restoredDocs,
+		"expected_docs": expectedDocCount,
+	})
 }
 
 func (s *Server) handleSnapshotGet(w http.ResponseWriter, r *http.Request) {
@@ -533,6 +725,9 @@ func (s *Server) handleSnapshotDelete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "snapshot_not_found_exception", "snapshot not found", snap)
 		return
 	}
+	// 同时删除磁盘上的 NDJSON 文件
+	snapPath := s.snapshotPath(repo, snap)
+	_ = os.Remove(snapPath)
 	_ = s.store.Delete(storage.SnapshotKey(repo, snap))
 	writeJSON(w, http.StatusOK, map[string]interface{}{"acknowledged": true})
 }

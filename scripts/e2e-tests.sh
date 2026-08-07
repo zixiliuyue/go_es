@@ -1604,6 +1604,116 @@ else
   fail "build_info" "missing"
 fi
 
+# ---------- 35. 真实快照与恢复 ----------
+header "35. 真实快照与恢复 (#16)"
+TS_SNAP=$(date +%s)
+SNAP_IDX="snap_${TS_SNAP}"
+SNAP_REPO="repo_${TS_SNAP}"
+SNAP_NAME="snap_${TS_SNAP}"
+
+# 35a. 创建快照仓库
+assert_status "create snapshot repo" 200 PUT "$GO_ES_URL/_snapshot/$SNAP_REPO" \
+  '{"type":"fs","settings":{"location":"/data/snapshots"}}'
+
+# 35b. 写入测试数据
+curl -s -X PUT "$GO_ES_URL/$SNAP_IDX" >/dev/null
+for n in 1 2 3 4 5; do
+  curl -s -X PUT "$GO_ES_URL/$SNAP_IDX/_doc/$n" -H 'Content-Type: application/json' \
+    -d "{\"title\":\"snap doc $n\",\"value\":$n}" >/dev/null
+done
+
+# 35c. 创建快照 (实际遍历存储, 写 NDJSON 文件)
+assert_status "create snapshot" 200 PUT "$GO_ES_URL/_snapshot/$SNAP_REPO/$SNAP_NAME"
+
+# 35d. 验证快照元信息可查
+RES=$(curl -s -X GET "$GO_ES_URL/_snapshot/$SNAP_REPO/$SNAP_NAME")
+STATE=$(echo "$RES" | jq -r '.snapshots[0].state // ""' 2>/dev/null)
+REPO_NAME=$(echo "$RES" | jq -r '.snapshots[0].repository // ""' 2>/dev/null)
+SNAP_NAME_RET=$(echo "$RES" | jq -r '.snapshots[0].snapshot // ""' 2>/dev/null)
+if [ "$STATE" = "SUCCESS" ] && [ "$REPO_NAME" = "$SNAP_REPO" ] && [ "$SNAP_NAME_RET" = "$SNAP_NAME" ]; then
+  ok "snapshot metadata: state=$STATE repo=$REPO_NAME snap=$SNAP_NAME_RET"
+else
+  fail "snapshot metadata" "state=$STATE repo=$REPO_NAME snap=$SNAP_NAME_RET body=$RES"
+fi
+
+# 35e. 删除原索引中的数据
+for n in 1 2 3 4 5; do
+  curl -s -X DELETE "$GO_ES_URL/$SNAP_IDX/_doc/$n" >/dev/null
+done
+# 验证数据已删除
+RES=$(curl -s -X POST "$GO_ES_URL/$SNAP_IDX/_search" -H 'Content-Type: application/json' \
+  -d '{"query":{"match_all":{}}}')
+N=$(echo "$RES" | jq -r '.hits.total.value // 0' 2>/dev/null)
+if [ "$N" = "0" ]; then
+  ok "原数据已清空 (0 docs)"
+else
+  fail "data deletion" "got=$N docs still exist"
+fi
+
+# 35f. 从快照恢复 (单次请求, 同时验证状态码和响应字段)
+RES=$(curl -s -w '\n%{http_code}' -X POST "$GO_ES_URL/_snapshot/$SNAP_REPO/$SNAP_NAME/_restore")
+HTTP_CODE=$(echo "$RES" | tail -n1)
+RES_BODY=$(echo "$RES" | sed '$d')
+if [ "$HTTP_CODE" = "200" ]; then
+  ok "restore snapshot -> 200"
+else
+  fail "restore snapshot" "http_code=$HTTP_CODE"
+fi
+
+# 35f-1. 验证恢复响应包含 restored_docs 和 expected_docs
+HAS_RESTORED_DOCS=$(echo "$RES_BODY" | jq 'has("restored_docs")' 2>/dev/null)
+HAS_EXPECTED_DOCS=$(echo "$RES_BODY" | jq 'has("expected_docs")' 2>/dev/null)
+if [ "$HAS_RESTORED_DOCS" = "true" ] && [ "$HAS_EXPECTED_DOCS" = "true" ]; then
+  ok "恢复响应包含 restored_docs 和 expected_docs 字段"
+else
+  fail "restore response fields" "restored_docs=$HAS_RESTORED_DOCS expected_docs=$HAS_EXPECTED_DOCS"
+fi
+
+# 35g. 验证恢复后数据存在
+RES=$(curl -s -X POST "$GO_ES_URL/$SNAP_IDX/_search" -H 'Content-Type: application/json' \
+  -d '{"query":{"match_all":{}}}')
+N=$(echo "$RES" | jq -r '.hits.total.value // 0' 2>/dev/null)
+if [ "$N" = "5" ]; then
+  ok "恢复后数据: 5 docs 全部恢复"
+else
+  fail "restore verification" "got=$N docs (expect 5)"
+fi
+
+# 35h. 验证恢复后数据可搜索 (倒排索引重建)
+RES=$(curl -s -X POST "$GO_ES_URL/$SNAP_IDX/_search" -H 'Content-Type: application/json' \
+  -d '{"query":{"match":{"title":"snap"}}}')
+N=$(echo "$RES" | jq -r '.hits.total.value // 0' 2>/dev/null)
+if [ "$N" = "5" ]; then
+  ok "恢复后搜索: 匹配 snap 命中 5 docs (倒排已重建)"
+else
+  fail "search after restore" "got=$N results (expect 5)"
+fi
+
+# 35i. 获取恢复后文档, 验证内容完整
+RES=$(curl -s -X GET "$GO_ES_URL/$SNAP_IDX/_doc/1")
+TITLE=$(echo "$RES" | jq -r '._source.title // ""' 2>/dev/null)
+VALUE=$(echo "$RES" | jq -r '._source.value // 0' 2>/dev/null)
+if [ "$TITLE" = "snap doc 1" ] && [ "$VALUE" = "1" ]; then
+  ok "恢复后文档内容完整: title=$TITLE value=$VALUE"
+else
+  fail "document content" "title=$TITLE value=$VALUE"
+fi
+
+# 35j. 删除快照
+assert_status "delete snapshot" 200 DELETE "$GO_ES_URL/_snapshot/$SNAP_REPO/$SNAP_NAME"
+
+# 35k. 验证快照已删除
+assert_status "get deleted snapshot -> 404" 404 GET "$GO_ES_URL/_snapshot/$SNAP_REPO/$SNAP_NAME"
+
+# 35k-1. 验证恢复已删除快照 -> 404
+assert_status "restore deleted snapshot -> 404" 404 POST "$GO_ES_URL/_snapshot/$SNAP_REPO/$SNAP_NAME/_restore"
+
+# 35l. 恢复不存在的快照 -> 404
+assert_status "restore missing snapshot -> 404" 404 POST "$GO_ES_URL/_snapshot/$SNAP_REPO/nonexistent/_restore"
+
+# 35m. 删除快照仓库
+assert_status "delete snapshot repo" 200 DELETE "$GO_ES_URL/_snapshot/$SNAP_REPO"
+
 # ---------- 总结 ----------
 echo
 printf "${YELLOW}== 总结 ==${NC}\n"
