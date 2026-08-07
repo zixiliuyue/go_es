@@ -623,6 +623,128 @@ RES=$(curl -s -X POST "$GO_ES_URL/$UQ_IDX/_update_by_query?wait_for_completion=f
 TASK_ID=$(echo "$RES" | jq -r '.task // empty' 2>/dev/null)
 if [ -n "$TASK_ID" ]; then ok "update_by_query async 返回 task=$TASK_ID"; else fail "async update_by_query" "no task id"; fi
 
+# ---------- 18. highlight ----------
+header "18. highlight 高亮"
+TS_HL=$(date +%s)
+HL_IDX="hl_${TS_HL}"
+curl -s -X PUT "$GO_ES_URL/$HL_IDX" >/dev/null
+curl -s -X PUT "$GO_ES_URL/$HL_IDX/_doc/1" -H 'Content-Type: application/json' -d '{"title":"The Quick Brown Fox Jumps","body":"fox jumps over the lazy dog"}' >/dev/null
+curl -s -X PUT "$GO_ES_URL/$HL_IDX/_doc/2" -H 'Content-Type: application/json' -d '{"title":"The Fox and the Hound"}' >/dev/null
+
+# 18a. match 命中 + highlight 返回
+RES=$(curl -s -X POST "$GO_ES_URL/$HL_IDX/_search" -H 'Content-Type: application/json' \
+  -d '{"query":{"match":{"title":"fox"}},"highlight":{"fields":{"title":{}}}}')
+HL_FRAG=$(echo "$RES" | jq -r '.hits.hits[0].highlight.title[0] // ""' 2>/dev/null)
+if echo "$HL_FRAG" | grep -q '<em>Fox</em>'; then
+  ok "highlight 命中 'Fox' 包裹 em 标签"
+else
+  fail "highlight" "got=$HL_FRAG"
+fi
+
+# 18b. 自定义 pre/post tags
+RES=$(curl -s -X POST "$GO_ES_URL/$HL_IDX/_search" -H 'Content-Type: application/json' \
+  -d '{"query":{"match":{"title":"fox"}},"highlight":{"fields":{"title":{}},"pre_tags":["<b>"],"post_tags":["</b>"]}}')
+HL_FRAG2=$(echo "$RES" | jq -r '.hits.hits[0].highlight.title[0] // ""' 2>/dev/null)
+if echo "$HL_FRAG2" | grep -q '<b>Fox</b>'; then
+  ok "自定义 tags 生效"
+else
+  fail "custom tags" "got=$HL_FRAG2"
+fi
+
+# 18c. 没匹配 token 时不返回 highlight
+RES=$(curl -s -X POST "$GO_ES_URL/$HL_IDX/_search" -H 'Content-Type: application/json' \
+  -d '{"query":{"match":{"title":"elephant"}},"highlight":{"fields":{"title":{}}}}')
+HL_NONE=$(echo "$RES" | jq -r '.hits.hits[0].highlight // "empty"' 2>/dev/null)
+if [ "$HL_NONE" = "empty" ]; then ok "无匹配时无 highlight 字段"; else fail "no highlight" "got=$HL_NONE"; fi
+
+# ---------- 19. _source 过滤 ----------
+header "19. _source 过滤"
+TS_SR=$(date +%s)
+SR_IDX="sr_${TS_SR}"
+curl -s -X PUT "$GO_ES_URL/$SR_IDX" >/dev/null
+curl -s -X PUT "$GO_ES_URL/$SR_IDX/_doc/1" -H 'Content-Type: application/json' -d '{"a":1,"b":2,"c":3}' >/dev/null
+
+# 19a. _source=false -> 不返回 _source
+RES=$(curl -s -X POST "$GO_ES_URL/$SR_IDX/_search" -H 'Content-Type: application/json' \
+  -d '{"query":{"match_all":{}},"_source":false}')
+HAS_SRC=$(echo "$RES" | jq -r '.hits.hits[0]._source // "absent"' 2>/dev/null)
+if [ "$HAS_SRC" = "absent" ]; then ok "_source=false 不返回 _source"; else fail "_source=false" "got=$HAS_SRC"; fi
+
+# 19b. _source=["a","c"] -> 只保留 a 和 c
+RES=$(curl -s -X POST "$GO_ES_URL/$SR_IDX/_search" -H 'Content-Type: application/json' \
+  -d '{"query":{"match_all":{}},"_source":["a","c"]}')
+SRC=$(echo "$RES" | jq -r '.hits.hits[0]._source' 2>/dev/null)
+HAS_A=$(echo "$SRC" | jq -r '.a // "no"' 2>/dev/null)
+HAS_B=$(echo "$SRC" | jq -r '.b // "no"' 2>/dev/null)
+HAS_C=$(echo "$SRC" | jq -r '.c // "no"' 2>/dev/null)
+if [ "$HAS_A" = "1" ] && [ "$HAS_B" = "no" ] && [ "$HAS_C" = "3" ]; then
+  ok "_source 白名单: a=1 保留, b 去除, c=3 保留"
+else
+  fail "_source whitelist" "a=$HAS_A b=$HAS_B c=$HAS_C"
+fi
+
+# 19c. _source=true (默认行为) -> 全部保留
+RES=$(curl -s -X POST "$GO_ES_URL/$SR_IDX/_search" -H 'Content-Type: application/json' \
+  -d '{"query":{"match_all":{}},"_source":true}')
+SRC=$(echo "$RES" | jq -r '.hits.hits[0]._source' 2>/dev/null)
+N=$(echo "$SRC" | jq -r 'keys | length' 2>/dev/null)
+if [ "$N" = "3" ]; then ok "_source=true 全保留 (3 字段)"; else fail "_source=true" "got=$N"; fi
+
+# ---------- 20. track_total_hits ----------
+header "20. track_total_hits"
+TS_TT=$(date +%s)
+TT_IDX="tt_${TS_TT}"
+curl -s -X PUT "$GO_ES_URL/$TT_IDX" >/dev/null
+# 写 15 条 doc
+for n in $(seq 1 15); do
+  curl -s -X PUT "$GO_ES_URL/$TT_IDX/_doc/$n" -H 'Content-Type: application/json' -d "{\"n\":$n}" >/dev/null
+done
+
+# 20a. 默认: 上限 10000, 15 < 10000, total=15, relation=eq
+RES=$(curl -s -X POST "$GO_ES_URL/$TT_IDX/_search" -H 'Content-Type: application/json' \
+  -d '{"query":{"match_all":{}},"size":2}')
+TOTAL=$(echo "$RES" | jq -r '.hits.total.value // 0' 2>/dev/null)
+REL=$(echo "$RES" | jq -r '.hits.total.relation // ""' 2>/dev/null)
+if [ "$TOTAL" = "15" ] && [ "$REL" = "eq" ]; then
+  ok "track_total_hits 默认: total=15, relation=eq (15 < 默认 10000)"
+else
+  fail "track_total_hits default" "total=$TOTAL rel=$REL"
+fi
+
+# 20b. track_total_hits=true -> 精确统计
+RES=$(curl -s -X POST "$GO_ES_URL/$TT_IDX/_search" -H 'Content-Type: application/json' \
+  -d '{"query":{"match_all":{}},"size":2,"track_total_hits":true}')
+TOTAL=$(echo "$RES" | jq -r '.hits.total.value // 0' 2>/dev/null)
+REL=$(echo "$RES" | jq -r '.hits.total.relation // ""' 2>/dev/null)
+if [ "$TOTAL" = "15" ] && [ "$REL" = "eq" ]; then
+  ok "track_total_hits=true: total=15, relation=eq"
+else
+  fail "track_total_hits=true" "total=$TOTAL rel=$REL"
+fi
+
+# 20c. track_total_hits=N (N < total) -> 截断到 N, relation=gte
+RES=$(curl -s -X POST "$GO_ES_URL/$TT_IDX/_search" -H 'Content-Type: application/json' \
+  -d '{"query":{"match_all":{}},"size":2,"track_total_hits":5}')
+TOTAL=$(echo "$RES" | jq -r '.hits.total.value // 0' 2>/dev/null)
+REL=$(echo "$RES" | jq -r '.hits.total.relation // ""' 2>/dev/null)
+if [ "$TOTAL" = "5" ] && [ "$REL" = "gte" ]; then
+  ok "track_total_hits=5: total=5, relation=gte (15 实际但被截断)"
+else
+  fail "track_total_hits=5" "total=$TOTAL rel=$REL"
+fi
+
+# 20d. track_total_hits=false -> ES 默认行为(10000 上限)
+RES=$(curl -s -X POST "$GO_ES_URL/$TT_IDX/_search" -H 'Content-Type: application/json' \
+  -d '{"query":{"match_all":{}},"size":2,"track_total_hits":false}')
+TOTAL=$(echo "$RES" | jq -r '.hits.total.value // 0' 2>/dev/null)
+REL=$(echo "$RES" | jq -r '.hits.total.relation // ""' 2>/dev/null)
+# 15 < 10000 所以仍是 eq=15
+if [ "$TOTAL" = "15" ] && [ "$REL" = "eq" ]; then
+  ok "track_total_hits=false: 15 < 默认 10000, total=15, relation=eq"
+else
+  fail "track_total_hits=false" "total=$TOTAL rel=$REL"
+fi
+
 # ---------- 13. config 加载 + 热更新 ----------
 header "13. 配置文件加载(无配置应不影响启动)"
 # 自研 server 当前没挂 -config 也能起, 这里通过 /metrics 已包含 go_es_build_info 验证

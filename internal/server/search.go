@@ -61,15 +61,23 @@ func (s *Server) doSearch(w http.ResponseWriter, r *http.Request, indices []stri
 	}
 
 	allHits := make([]hit, 0)
+	// totalHits 是分页前所有匹配的 doc 计数(跨索引), 用于 track_total_hits
+	totalHitsAll := 0
 	took := time.Now()
 	// 判定是否需要 BM25 打分
 	scored := isTextQuery(q)
+	// highlight 提取 query tokens
+	highlightTokens := extractQueryTokensFromQuery(viewForHighlight(q))
+	// source 过滤是否启用(false=不显 _source)
+	sourceEnabled := req.SourceFilter == nil || req.SourceFilter != false
 	for _, idx := range indices {
 		ids, err := s.engine.Match(idx, q)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "search_phase_execution_exception", err.Error(), "")
 			return
 		}
+		// 累计分页前的总命中数
+		totalHitsAll += len(ids)
 		from := req.From
 		size := req.Size
 		if size == 0 {
@@ -102,6 +110,16 @@ func (s *Server) doSearch(w http.ResponseWriter, r *http.Request, indices []stri
 			} else {
 				h.Score = 1.0
 			}
+			// _source 过滤
+			if sourceEnabled && req.SourceFilter != nil && req.SourceFilter != true {
+				h.Source = applySourceFilter(src, req.SourceFilter)
+			} else if !sourceEnabled {
+				h.Source = nil
+			}
+			// highlight(只有 source 存在时才有意义)
+			if len(highlightTokens) > 0 && len(req.Highlight) > 0 && h.Source != nil {
+				h.Highlight = applyHighlight(h.Source, req.Highlight, highlightTokens)
+			}
 			allHits = append(allHits, h)
 		}
 	}
@@ -118,20 +136,29 @@ func (s *Server) doSearch(w http.ResponseWriter, r *http.Request, indices []stri
 		return allHits[i].Index < allHits[j].Index
 	})
 
-	total := len(allHits)
+	// total.value / total.relation 受 track_total_hits 控制
+	exactTotal, totalCap := trackTotalHitsValue(req.TrackTotalHits)
+	page := len(allHits)
+	totalValue := int64(totalHitsAll)
+	relation := "eq"
+	if !exactTotal && int64(totalHitsAll) > int64(totalCap) {
+		totalValue = int64(totalCap)
+		relation = "gte"
+	}
+	_ = page
 	resp := map[string]interface{}{
 		"took": time.Since(took).Milliseconds(),
 		"hits": map[string]interface{}{
 			"total": map[string]interface{}{
-				"value":    total,
-				"relation": "eq",
+				"value":    totalValue,
+				"relation": relation,
 			},
 			"hits": allHits,
 		},
 	}
 	// 聚合: 在已命中的 hits 上求值(每个 hit 携 (index, docID) 信息)
 	if len(req.Aggregations) > 0 {
-		indexedHits := make([]search.IndexedHit, 0, total)
+		indexedHits := make([]search.IndexedHit, 0, len(allHits))
 		for _, h := range allHits {
 			indexedHits = append(indexedHits, search.IndexedHit{Index: h.Index, DocID: h.ID})
 		}
@@ -161,6 +188,12 @@ type searchRequest struct {
 	// 新增: 聚合定义, 形如 {"name1": {"terms": {...}}, "name2": {"avg": {...}}}
 	// 与 ES 兼容: 顶层 key 是聚合名, value 是 {"<agg_type>": <def>}
 	Aggregations map[string]interface{} `json:"aggs,omitempty"`
+	// _source 过滤: true=全显, false=不显, []string=只显指定字段, 默认 true
+	SourceFilter interface{} `json:"_source,omitempty"`
+	// highlight: {"fields": {"field_name": {}}, "pre_tags": [...], "post_tags": [...]}
+	Highlight map[string]interface{} `json:"highlight,omitempty"`
+	// track_total_hits: true=全量统计, false=截断, int=上限
+	TrackTotalHits interface{} `json:"track_total_hits,omitempty"`
 }
 
 // hit 单条命中
@@ -169,6 +202,8 @@ type hit struct {
 	ID     string                 `json:"_id"`
 	Score  float64                `json:"_score,omitempty"`
 	Source map[string]interface{} `json:"_source,omitempty"`
+	// 新增: 高亮片段, 与 ES 兼容: {"field_name": ["...<em>tok</em>..."]}
+	Highlight map[string][]string `json:"highlight,omitempty"`
 }
 
 // parseQuery 把 search.Request.Query 转为 *search.Query
