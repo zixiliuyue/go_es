@@ -50,6 +50,8 @@ type Server struct {
 	shutdown   *ShutdownState
 	startedAt  time.Time
 	startupDone atomic.Bool
+	// RBAC 授权(新加, 索引级 + 操作级)
+	rbac *rbac
 }
 
 // ServerOptions 构造服务端的可选配置
@@ -90,6 +92,7 @@ func NewWithOptions(store *storage.Store, engine *search.Engine, logger *zap.Log
 		metrics:     metrics,
 		shutdown:    shutdown,
 		guards:      newGuards(logger, metrics, shutdown, opts.Auth, opts.Limit),
+		rbac:        newRBAC(),
 		startedAt:   time.Now(),
 	}
 	s.router = s.buildRouter()
@@ -105,7 +108,8 @@ func (s *Server) MarkStartupDone() { s.startupDone.Store(true) }
 // Handler 返回 net/http.Handler
 func (s *Server) Handler() http.Handler {
 	router := http.HandlerFunc(s.router.ServeHTTP)
-	return s.guards.chainMiddleware(router)
+	// 链路顺序: auth (in chainMiddleware) -> rbac -> bodyLimit -> rateLimit -> router
+	return s.guards.chainMiddleware(s.middlewareRBAC(router))
 }
 
 // buildRouter 构造路由表
@@ -186,6 +190,19 @@ func (s *Server) buildRouter() *router {
 	// /_ui/  与  /_ui/index.html  内置 Web 控制台
 	rt.addExact("GET", []string{"_ui"}, s.handleUI)
 	rt.addExact("GET", []string{"_ui", "index.html"}, s.handleUI)
+
+	// /_security/*  RBAC API
+	rt.addExact("GET", []string{"_security", "whoami"}, s.handleWhoAmI)
+	rt.addExact("GET", []string{"_security", "user"}, s.handleListUsers)
+	rt.addExact("GET", []string{"_security", "user", "{name}"}, s.handleGetUser)
+	rt.addExact("POST", []string{"_security", "user", "{name}"}, s.handleCreateUser)
+	rt.addExact("PUT", []string{"_security", "user", "{name}"}, s.handleCreateUser)
+	rt.addExact("DELETE", []string{"_security", "user", "{name}"}, s.handleDeleteUser)
+	rt.addExact("GET", []string{"_security", "role"}, s.handleListRoles)
+	rt.addExact("GET", []string{"_security", "role", "{name}"}, s.handleGetRole)
+	rt.addExact("POST", []string{"_security", "role", "{name}"}, s.handleCreateRole)
+	rt.addExact("PUT", []string{"_security", "role", "{name}"}, s.handleCreateRole)
+	rt.addExact("DELETE", []string{"_security", "role", "{name}"}, s.handleDeleteRole)
 
 	// 兜底: {index}/...
 	rt.addIndexDispatcher(s.dispatchIndex)
