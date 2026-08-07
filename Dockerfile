@@ -1,5 +1,5 @@
 # 多阶段构建 Go Demo
-FROM golang:1.25-alpine AS builder
+FROM golang:1.26-alpine AS builder
 WORKDIR /src
 RUN go env -w GOPROXY=https://goproxy.cn,direct
 COPY go.mod go.sum ./
