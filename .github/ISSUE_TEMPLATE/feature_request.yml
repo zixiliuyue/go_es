@@ -1,0 +1,35 @@
+name: "Feature Request"
+description: 提議新的能力 / 改進
+title: "[Feature] "
+labels: ["enhancement"]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        在填寫前請先搜索已有 issue / PR,避免重複.
+        描述你希望 go_es 加什麼能力,以及為什麼.
+  - type: textarea
+    id: problem
+    attributes:
+      label: "解決什麼問題"
+      description: "你目前的痛點,使用場景"
+      validations:
+        required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: "提議方案"
+      description: "你希望 API / 行為是怎樣的"
+      validations:
+        required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: "已考慮的替代方案"
+      description: "權衡 / 取捨"
+  - type: textarea
+    id: additional
+    attributes:
+      label: "附加上下文"
+      placeholder: "相關鏈接 / mockup / benchmark 數據"

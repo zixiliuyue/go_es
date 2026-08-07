@@ -1,0 +1,72 @@
+name: "Bug Report"
+description: 報告 go_es 自研服務端或 SDK 的功能異常
+title: "[Bug] "
+labels: ["bug", "needs-triage"]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感謝你提交 bug!請盡量提供:
+        - 最小重現命令 (curl / Go 代碼)
+        - 預期 vs 實際
+        - 環境 (Go 版本 / OS / ES 版本)
+  - type: dropdown
+    id: component
+    attributes:
+      label: "受影響組件"
+      description: "選擇出問題的位置"
+      options:
+        - "cmd/server (自研服務端)"
+        - "pkg/* (Go SDK)"
+        - "internal/server/* (服務端內部)"
+        - "Web UI (/_ui)"
+        - "Docker / 容器化"
+        - "文檔 / 示例"
+        - "其它"
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: "重現步驟"
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: "預期行為"
+      validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: "實際行為"
+      validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: "go_es 版本 / commit"
+      placeholder: "v0.x.y 或 commit hash"
+  - type: textarea
+    id: env
+    attributes:
+      label: "環境"
+      placeholder: |
+        - Go: go1.25.x
+        - OS: macOS 14 / Ubuntu 22.04
+        - ES: 8.13.4 (如有)
+        - 部署方式: docker / bare-metal
+  - type: textarea
+    id: logs
+    attributes:
+      label: "日誌 / 錯誤輸出"
+      placeholder: |
+        ```
+        panic: ...
+        ```

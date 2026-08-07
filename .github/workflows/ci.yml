@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------- 1. 基础: 编译 + 单测 + vet ----------
+  test:
+    name: test (${{ matrix.os }} / go${{ matrix.go }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        go: ['1.25.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          cache: true
+      - name: go mod download
+        run: go mod download
+      - name: go build
+        run: go build ./...
+      - name: go vet
+        run: go vet ./...
+      - name: go test (internal/...)
+        run: go test -count=1 -race ./internal/...
+
+  # ---------- 2. 漏洞扫描 ----------
+  vuln:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.12'
+          cache: true
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - name: Run govulncheck
+        # stdlib vulns 升级到 1.25.12 后应为 0; module 漏洞只关注被代码 import 的
+        run: govulncheck ./... || (echo "::error::govulncheck 发现漏洞, 请升级依赖或 Go 版本" && exit 1)
+
+  # ---------- 3. 容器化端到端 (Linux only) ----------
+  e2e:
+    name: e2e docker (linux)
+    runs-on: ubuntu-latest
+    needs: [test, vuln]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run e2e in docker
+        run: bash scripts/test-in-docker.sh
+      - name: Upload tester logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-logs
+          path: |
+            /tmp/e2e-*.log
+            *.log
+          if-no-files-found: ignore
+
+  # ---------- 4. TLS / mTLS 容器化端到端 ----------
+  tls-e2e:
+    name: tls + mtls e2e docker
+    runs-on: ubuntu-latest
+    needs: [test, vuln]
+    steps:
+      - uses: actions/checkout@v4
+      - name: TLS e2e
+        run: bash scripts/test-tls-in-docker.sh
+      - name: mTLS e2e
+        run: bash scripts/test-mtls-in-docker.sh
+
+  # ---------- 5. 敏感信息扫描 (轻量) ----------
+  secrets-scan:
+    name: secrets scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Detect plaintext credentials
+        run: |
+          set -e
+          # 简单白名单: 测试占位符 (fixtures in *_test.go, config_test.go, examples/)
+          # 真凭据通常匹配: AKIA / Bearer / private_key / API[_-]?KEY=... / 32+ 位 hex
+          BANNED='AKIA[0-9A-Z]{16}|BEGIN (RSA |EC |OPENSSH |)PRIVATE KEY|api[_-]?key[[:space:]]*[:=][[:space:]]*["a-zA-Z0-9_.-]{16,}|bearer[[:space:]]+[A-Za-z0-9._-]{20,}|ghp_[A-Za-z0-9]{36}|xox[baprs]-[A-Za-z0-9-]{10,}'
+          # 排除已知 fixture 路径
+          EXCLUDES=':(!)*_test.go|examples/main.go|README.md|DOCKER.md|CONTRIBUTING.md|AGENTS.md|SECURITY.md|.*\.md$'
+          if grep -RInE "$BANNED" . --include='*.go' --include='*.yaml' --include='*.yml' --include='*.sh' --include='*.js' --include='*.html' | grep -vE "$EXCLUDES"; then
+            echo "::error::发现疑似敏感凭据, 提交被阻断"
+            exit 1
+          fi
+          echo "no secrets found"
