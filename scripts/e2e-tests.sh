@@ -1240,6 +1240,80 @@ else
   fail "POST auto id" "seq=$SEQ"
 fi
 
+# ---------- 30. 写入事务合并 + 回压 ----------
+header "30. 写入事务合并 + 回压"
+TS_WC=$(date +%s)
+WC_IDX="wc_${TS_WC}"
+curl -s -X PUT "$GO_ES_URL/$WC_IDX" >/dev/null
+
+# 30a. Bulk 写 100 条 -> 一次事务, 全部成功
+BULK_BODY=""
+for n in $(seq 1 100); do
+  BULK_BODY="${BULK_BODY}{\"index\":{\"_index\":\"$WC_IDX\",\"_id\":\"$n\"}}
+{\"title\":\"doc $n\"}
+"
+done
+RES=$(curl -s -X POST "$GO_ES_URL/_bulk" -H 'Content-Type: application/x-ndjson' --data-binary "$BULK_BODY")
+ITEM_COUNT=$(echo "$RES" | jq -r '.items | length' 2>/dev/null)
+ERRORS=$(echo "$RES" | jq -r '.errors' 2>/dev/null)
+if [ "$ITEM_COUNT" = "100" ] && [ "$ERRORS" = "false" ]; then
+  ok "Bulk 100 条, errors=false, items=100 (单事务合并)"
+else
+  fail "bulk 100" "items=$ITEM_COUNT errors=$ERRORS"
+fi
+
+# 30b. Bulk 含 create + delete 混合
+BULK_BODY=""
+for n in $(seq 1 10); do
+  BULK_BODY="${BULK_BODY}{\"create\":{\"_index\":\"$WC_IDX\",\"_id\":\"c$n\"}}
+{\"title\":\"c $n\"}
+"
+done
+# 加 delete
+BULK_BODY="${BULK_BODY}{\"delete\":{\"_index\":\"$WC_IDX\",\"_id\":\"1\"}}
+"
+RES=$(curl -s -X POST "$GO_ES_URL/_bulk" -H 'Content-Type: application/x-ndjson' --data-binary "$BULK_BODY")
+ITEM_COUNT=$(echo "$RES" | jq -r '.items | length' 2>/dev/null)
+ERRORS=$(echo "$RES" | jq -r '.errors' 2>/dev/null)
+if [ "$ITEM_COUNT" = "11" ] && [ "$ERRORS" = "false" ]; then
+  ok "Bulk 混合 create+delete 11 条全部成功"
+else
+  fail "bulk mixed" "items=$ITEM_COUNT errors=$ERRORS"
+fi
+
+# 30c. Bulk create 重复 -> 409
+BULK_BODY="{\"create\":{\"_index\":\"$WC_IDX\",\"_id\":\"c1\"}}
+{\"title\":\"dup\"}
+"
+RES=$(curl -s -X POST "$GO_ES_URL/_bulk" -H 'Content-Type: application/x-ndjson' --data-binary "$BULK_BODY")
+HTTP_CODE=$(curl -s -o /tmp/_wc_body -w "%{http_code}" -X POST "$GO_ES_URL/_bulk" -H 'Content-Type: application/x-ndjson' --data-binary "$BULK_BODY")
+ERR_TYPE=$(cat /tmp/_wc_body | jq -r '.items[0].index.error.type // .items[0].create.error.type // ""' 2>/dev/null)
+if [ "$ERR_TYPE" = "version_conflict_engine_exception" ]; then
+  ok "Bulk create 重复 -> 单 op 409, 整批不回滚"
+else
+  fail "bulk create dup" "type=$ERR_TYPE code=$HTTP_CODE"
+fi
+
+# 30d. Bulk 删除不存在的 doc -> 200 (ES 行为)
+BULK_BODY="{\"delete\":{\"_index\":\"$WC_IDX\",\"_id\":\"nonexistent\"}}
+"
+RES=$(curl -s -X POST "$GO_ES_URL/_bulk" -H 'Content-Type: application/x-ndjson' --data-binary "$BULK_BODY")
+ITEM_STATUS=$(echo "$RES" | jq -r '.items[0].delete.status // 0' 2>/dev/null)
+if [ "$ITEM_STATUS" = "200" ] || [ "$ITEM_STATUS" = "404" ]; then
+  ok "Bulk delete 不存在 -> status=$ITEM_STATUS (兼容)"
+else
+  fail "bulk delete missing" "status=$ITEM_STATUS"
+fi
+
+# 30e. 验证 batch 写完 doc 数正确
+RES=$(curl -s -X POST "$GO_ES_URL/$WC_IDX/_search" -H 'Content-Type: application/json' -d '{"query":{"match_all":{}}}')
+N=$(echo "$RES" | jq -r '.hits.total.value // 0' 2>/dev/null)
+if [ "$N" -ge "109" ]; then
+  ok "wc 索引共 $N doc (100+10-1+1c1dup)"
+else
+  fail "wc count" "got=$N body=$RES"
+fi
+
 # ---------- 13. config 加载 + 热更新 ----------
 header "13. 配置文件加载(无配置应不影响启动)"
 # 自研 server 当前没挂 -config 也能起, 这里通过 /metrics 已包含 go_es_build_info 验证

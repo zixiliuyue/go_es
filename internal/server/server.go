@@ -52,6 +52,8 @@ type Server struct {
 	startupDone atomic.Bool
 	// RBAC 授权(新加, 索引级 + 操作级)
 	rbac *rbac
+	// WriteCoordinator 写入事务合并 + 回压
+	wc *WriteCoordinator
 }
 
 // ServerOptions 构造服务端的可选配置
@@ -93,6 +95,7 @@ func NewWithOptions(store *storage.Store, engine *search.Engine, logger *zap.Log
 		shutdown:    shutdown,
 		guards:      newGuards(logger, metrics, shutdown, opts.Auth, opts.Limit),
 		rbac:        newRBAC(),
+		wc:          NewWriteCoordinator(WriteConfig{MaxConcurrent: 64, MaxBatchSize: 1000}),
 		startedAt:   time.Now(),
 	}
 	s.router = s.buildRouter()
