@@ -9,7 +9,7 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -o /out/go_es_server ./cmd/server
 
-FROM alpine:3.19
+FROM alpine:3.24
 RUN apk add --no-cache curl wget
 COPY --from=builder /out/go_es_server /usr/local/bin/go_es_server
 ENV ES_ADDR=:9200 \

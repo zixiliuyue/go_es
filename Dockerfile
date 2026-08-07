@@ -8,7 +8,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -o /out/go_es_demo ./examples
 
 # 运行时:等待 ES 就绪后执行 demo
-FROM alpine:3.19
+FROM alpine:3.24
 RUN apk add --no-cache curl bash
 COPY --from=builder /out/go_es_demo /usr/local/bin/go_es_demo
 COPY scripts/wait-for-es.sh /usr/local/bin/wait-for-es.sh
