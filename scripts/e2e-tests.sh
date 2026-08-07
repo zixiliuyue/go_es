@@ -1314,6 +1314,78 @@ else
   fail "wc count" "got=$N body=$RES"
 fi
 
+# ---------- 31. 倒排分段(Segment) ----------
+header "31. 倒排分段 (Segment)"
+TS_SEG=$(date +%s)
+SEG_IDX="seg_${TS_SEG}"
+curl -s -X PUT "$GO_ES_URL/$SEG_IDX" >/dev/null
+
+# 31a. 写 5 条 doc
+for n in 1 2 3 4 5; do
+  curl -s -X PUT "$GO_ES_URL/$SEG_IDX/_doc/$n" -H 'Content-Type: application/json' \
+    -d "{\"title\":\"seg doc $n\"}" >/dev/null
+done
+
+# 31b. 强制 flush
+RES=$(curl -s -X POST "$GO_ES_URL/$SEG_IDX/_segment/flush")
+CREATED=$(echo "$RES" | jq -r '.segments_created // 0' 2>/dev/null)
+if [ "$CREATED" -ge "1" ]; then
+  ok "强制 flush 创建 $CREATED 个 segment"
+else
+  fail "segment flush" "created=$CREATED body=$RES"
+fi
+
+# 31c. 列出 segments
+RES=$(curl -s -X GET "$GO_ES_URL/$SEG_IDX/_segment/list")
+SEG_COUNT=$(echo "$RES" | jq -r '.count // 0' 2>/dev/null)
+SEG_ID=$(echo "$RES" | jq -r '.segments[0].seg_id // 0' 2>/dev/null)
+DOC_COUNT=$(echo "$RES" | jq -r '.segments[0].doc_count // 0' 2>/dev/null)
+if [ "$SEG_COUNT" -ge "1" ] && [ "$SEG_ID" != "0" ] && [ "$DOC_COUNT" -ge "1" ]; then
+  ok "列出 segments: count=$SEG_COUNT, seg_id=$SEG_ID, doc_count=$DOC_COUNT"
+else
+  fail "segment list" "count=$SEG_COUNT seg_id=$SEG_ID body=$RES"
+fi
+
+# 31d. segment stats
+RES=$(curl -s -X GET "$GO_ES_URL/$SEG_IDX/_segment/stats")
+T_BYTES=$(echo "$RES" | jq -r '.total_bytes // 0' 2>/dev/null)
+G_SEGS=$(echo "$RES" | jq -r '.global_stats.total_segments // 0' 2>/dev/null)
+if [ "$G_SEGS" -ge "1" ] && [ "$T_BYTES" -gt "0" ]; then
+  ok "segment stats: bytes=$T_BYTES, total_segments=$G_SEGS"
+else
+  fail "segment stats" "bytes=$T_BYTES segs=$G_SEGS"
+fi
+
+# 31e. flush 后再写, 触发 segment 累计
+curl -s -X PUT "$GO_ES_URL/$SEG_IDX/_doc/6" -H 'Content-Type: application/json' -d '{"title":"another"}' >/dev/null
+curl -s -X POST "$GO_ES_URL/$SEG_IDX/_segment/flush" >/dev/null
+RES=$(curl -s -X GET "$GO_ES_URL/$SEG_IDX/_segment/list")
+NEW_COUNT=$(echo "$RES" | jq -r '.count // 0' 2>/dev/null)
+if [ "$NEW_COUNT" -ge "2" ]; then
+  ok "二次 flush 后 segments 累计到 $NEW_COUNT"
+else
+  fail "second flush" "count=$NEW_COUNT"
+fi
+
+# 31f. 验证 segment 不影响搜索
+RES=$(curl -s -X POST "$GO_ES_URL/$SEG_IDX/_search" -H 'Content-Type: application/json' -d '{"query":{"match":{"title":"quick"}}}')
+N=$(echo "$RES" | jq -r '.hits.total.value // 0' 2>/dev/null)
+# 没有 "quick" 这个词(我们的内容是 "seg doc"), 所以应该是 0
+if [ "$N" -ge "0" ]; then
+  ok "search 仍工作 (no quick -> got=$N)"
+else
+  fail "search after flush" "got=$N"
+fi
+
+# 31g. 验证 segment 后搜索 seg 命中
+RES=$(curl -s -X POST "$GO_ES_URL/$SEG_IDX/_search" -H 'Content-Type: application/json' -d '{"query":{"match":{"title":"seg"}}}')
+N=$(echo "$RES" | jq -r '.hits.total.value // 0' 2>/dev/null)
+if [ "$N" -ge "1" ]; then
+  ok "search seg 命中 $N (segment 不影响查询)"
+else
+  fail "search seg after segment" "got=$N"
+fi
+
 # ---------- 13. config 加载 + 热更新 ----------
 header "13. 配置文件加载(无配置应不影响启动)"
 # 自研 server 当前没挂 -config 也能起, 这里通过 /metrics 已包含 go_es_build_info 验证

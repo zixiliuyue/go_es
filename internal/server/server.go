@@ -54,6 +54,8 @@ type Server struct {
 	rbac *rbac
 	// WriteCoordinator 写入事务合并 + 回压
 	wc *WriteCoordinator
+	// SegmentManager 倒排分段
+	seg *SegmentManager
 }
 
 // ServerOptions 构造服务端的可选配置
@@ -98,6 +100,12 @@ func NewWithOptions(store *storage.Store, engine *search.Engine, logger *zap.Log
 		wc:          NewWriteCoordinator(WriteConfig{MaxConcurrent: 64, MaxBatchSize: 1000}),
 		startedAt:   time.Now(),
 	}
+	// SegmentManager 初始化(在 wc 之后, 因为它依赖 engine)
+	s.seg = NewSegmentManager(SegmentConfig{
+		MaxBufferDocs:        10000,
+		MaxBufferBytes:       64 << 20,
+		AutoFlushIntervalSec: 30,
+	}, store, engine)
 	s.router = s.buildRouter()
 	return s
 }
@@ -295,6 +303,21 @@ func (s *Server) dispatchIndex(w http.ResponseWriter, r *http.Request, index str
 	// /{index}/_inverted/rebuild
 	if len(rest) >= 2 && rest[0] == "_inverted" && rest[1] == "rebuild" && method == http.MethodPost {
 		s.handleRebuildInverted(w, r, index)
+		return
+	}
+	// /{index}/_segment/flush
+	if len(rest) >= 2 && rest[0] == "_segment" && rest[1] == "flush" && method == http.MethodPost {
+		s.handleSegmentFlush(w, r, index)
+		return
+	}
+	// /{index}/_segment/list
+	if len(rest) >= 2 && rest[0] == "_segment" && rest[1] == "list" && method == http.MethodGet {
+		s.handleSegmentList(w, r, index)
+		return
+	}
+	// /{index}/_segment/stats
+	if len(rest) >= 2 && rest[0] == "_segment" && rest[1] == "stats" && method == http.MethodGet {
+		s.handleSegmentStats(w, r, index)
 		return
 	}
 	// /{index}/_inverted/info

@@ -255,9 +255,33 @@ func (e *Engine) BM25FieldScore(index, field, docID, query string) float64 {
 	return BM25Score(stats.TotalDocs, stats.AvgFieldLen, toks, field, e.scorer, index, docID)
 }
 
-// timeNow 返回当前毫秒时间戳, 顶层封装便于 mock
-func timeNow() int64 {
-	return stdTimeNow()
+// readDocMeta 读 doc 的版本元数据 (server 层定义, 由 json 反序列化)
+// timeNow 暴露给 server 层做时戳
+func timeNow() int64 { return stdTimeNow() }
+
+// SnapshotIndex 拿 index 倒排的浅拷贝
+//   - 用途: segment flush 时给 segment layer 一份不可变快照
+//   - 不影响正常读路径(只是多拷一份 map 头)
+// 返回 index -> field -> term -> set(docID)
+func (e *Engine) SnapshotIndex(index string) map[string]map[string]map[string]struct{} {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	out := make(map[string]map[string]map[string]struct{})
+	if e.inverted[index] == nil {
+		return out
+	}
+	for field, terms := range e.inverted[index] {
+		fout := make(map[string]map[string]struct{}, len(terms))
+		for term, docSet := range terms {
+			tout := make(map[string]struct{}, len(docSet))
+			for id := range docSet {
+				tout[id] = struct{}{}
+			}
+			fout[term] = tout
+		}
+		out[field] = fout
+	}
+	return out
 }
 
 // ensureFieldStats 取得字段统计; 若缺失,触发一次重建后返回

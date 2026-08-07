@@ -19,6 +19,7 @@
 package server
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -202,6 +203,16 @@ func (s *Server) applyWrite(op writeOp) (DocMeta, int, map[string]interface{}) {
 	}
 	// 推 inverted
 	s.engine.IndexDoc(op.Index, op.ID, op.Doc)
+	// segment 触发检查
+	if s.seg != nil {
+		docSize := docSizeOf(op.Doc)
+		if s.seg.OnWrite(op.Index, docSize) {
+			// 异步 flush, 不阻塞写
+			go func() {
+				_, _ = s.seg.FlushNow(op.Index)
+			}()
+		}
+	}
 	// status: 201 if create, 200 if index (and 201 if create always)
 	status := 200
 	if op.OpType == "create" || !currentExists {
@@ -235,6 +246,13 @@ func getQueryInt64(q map[string][]string, key string) int64 {
 		}
 	}
 	return 0
+}
+
+// docSizeOf 估算 doc 大小(字节), 用于 segment buffer 计数
+func docSizeOf(doc map[string]interface{}) int {
+	// 简化: JSON 序列化估算
+	b, _ := json.Marshal(doc)
+	return len(b)
 }
 
 // ifThen 三元运算式
