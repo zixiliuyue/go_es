@@ -274,6 +274,11 @@ func DocTFKey(index, id string) []byte {
 	return []byte("doc-tf/" + index + "/" + id)
 }
 
+// DocMetaKey 文档版本元数据键(doc-meta/<index>/<id> -> {seq_no, primary_term, version})
+func DocMetaKey(index, id string) []byte {
+	return []byte("doc-meta/" + index + "/" + id)
+}
+
 // PostingsVersionKey 倒排版本号(每次写递增, 用于缓存失效判定)
 func PostingsVersionKey(index string) []byte {
 	return []byte("postings-version/" + index)

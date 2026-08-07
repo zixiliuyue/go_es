@@ -166,22 +166,35 @@ func (s *Server) handleDocIndexForName(w http.ResponseWriter, r *http.Request, i
 		}
 		doc = processed
 	}
-	if err := s.store.Put(storage.DocKey(index, id), doc); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", err.Error(), "")
+	q := r.URL.Query()
+	meta, status, errResp := s.applyWrite(writeOp{
+		Index:         index,
+		ID:            id,
+		Doc:           doc,
+		OpType:        q.Get("op_type"),
+		IfSeqNo:       getQueryInt64(q, "if_seq_no"),
+		IfPrimaryTerm: getQueryInt64(q, "if_primary_term"),
+		IfVersion:     getQueryInt64(q, "version"),
+		Version:       getQueryInt64(q, "version"),
+		VersionType:   q.Get("version_type"),
+	})
+	if errResp != nil {
+		writeErrorJSON(w, status, errResp)
 		return
 	}
-	s.engine.IndexDoc(index, id, doc)
 	resp := map[string]interface{}{
-		"_index":   index,
-		"_id":      id,
-		"_version": 1,
-		"result":   "created",
-		"created":  true,
+		"_index":       index,
+		"_id":          id,
+		"_version":     meta.Version,
+		"_seq_no":      meta.SeqNo,
+		"_primary_term": meta.PrimaryTerm,
+		"result":       ifThen(meta.SeqNo == 1, "created", "updated"),
+		"_shards":      map[string]interface{}{"total": 1, "successful": 1, "failed": 0},
 	}
-	if r.URL.Query().Get("refresh") == "true" || r.URL.Query().Get("refresh") == "wait_for" {
+	if q.Get("refresh") == "true" || q.Get("refresh") == "wait_for" {
 		resp["_refresh"] = true
 	}
-	writeJSON(w, http.StatusOK, resp)
+	writeJSON(w, status, resp)
 }
 
 // handleDocIndexAutoIDForName POST /{index}/_doc
@@ -202,18 +215,35 @@ func (s *Server) handleDocIndexAutoIDForName(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	id := generateID()
-	if err := s.store.Put(storage.DocKey(index, id), doc); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", err.Error(), "")
+	q := r.URL.Query()
+	meta, status, errResp := s.applyWrite(writeOp{
+		Index:         index,
+		ID:            id,
+		Doc:           doc,
+		OpType:        q.Get("op_type"),
+		IfSeqNo:       getQueryInt64(q, "if_seq_no"),
+		IfPrimaryTerm: getQueryInt64(q, "if_primary_term"),
+		IfVersion:     getQueryInt64(q, "version"),
+		Version:       getQueryInt64(q, "version"),
+		VersionType:   q.Get("version_type"),
+	})
+	if errResp != nil {
+		writeErrorJSON(w, status, errResp)
 		return
 	}
-	s.engine.IndexDoc(index, id, doc)
-	writeJSON(w, http.StatusCreated, map[string]interface{}{
-		"_index":   index,
-		"_id":      id,
-		"_version": 1,
-		"result":   "created",
-		"created":  true,
-	})
+	resp := map[string]interface{}{
+		"_index":        index,
+		"_id":           id,
+		"_version":      meta.Version,
+		"_seq_no":       meta.SeqNo,
+		"_primary_term": meta.PrimaryTerm,
+		"result":        "created",
+		"_shards":       map[string]interface{}{"total": 1, "successful": 1, "failed": 0},
+	}
+	if q.Get("refresh") == "true" || q.Get("refresh") == "wait_for" {
+		resp["_refresh"] = true
+	}
+	writeJSON(w, status, resp)
 }
 
 // handleDocGetForName GET /{index}/_doc/{id}
@@ -230,12 +260,15 @@ func (s *Server) handleDocGetForName(w http.ResponseWriter, r *http.Request, ind
 	}
 	var doc map[string]interface{}
 	_ = json.Unmarshal(raw, &doc)
+	meta, _ := s.readDocMeta(index, id)
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"_index":   index,
-		"_id":      id,
-		"_version": 1,
-		"_source":  doc,
-		"found":    true,
+		"_index":        index,
+		"_id":           id,
+		"_version":      meta.Version,
+		"_seq_no":       meta.SeqNo,
+		"_primary_term": meta.PrimaryTerm,
+		"_source":       doc,
+		"found":         true,
 	})
 }
 

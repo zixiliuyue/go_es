@@ -90,7 +90,7 @@ func TestServer_IndexCreateAndDocCRUD(t *testing.T) {
 
 	// 写文档
 	resp, _ = do(t, ts, "PUT", "/articles/_doc/1", map[string]interface{}{"title": "hello go"})
-	assert.Equal(t, 200, resp.StatusCode)
+	assert.Equal(t, 201, resp.StatusCode)
 
 	// 读文档
 	resp, body := do(t, ts, "GET", "/articles/_doc/1", nil)

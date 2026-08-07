@@ -1137,6 +1137,109 @@ else
   fail "delete role" "got=$RES"
 fi
 
+# ---------- 29. _seq_no / _primary_term 乐观并发 ----------
+header "29. _seq_no / _primary_term 乐观并发"
+TS_OC=$(date +%s)
+OC_IDX="oc_${TS_OC}"
+curl -s -X PUT "$GO_ES_URL/$OC_IDX" >/dev/null
+
+# 29a. 第一次创建 -> 201, _seq_no=1
+RES=$(curl -s -X PUT "$GO_ES_URL/$OC_IDX/_doc/1" -H 'Content-Type: application/json' -d '{"a":1}')
+SEQ=$(echo "$RES" | jq -r '._seq_no // 0' 2>/dev/null)
+TERM=$(echo "$RES" | jq -r '._primary_term // 0' 2>/dev/null)
+VER=$(echo "$RES" | jq -r '._version // 0' 2>/dev/null)
+if [ "$SEQ" = "1" ] && [ "$TERM" = "1" ] && [ "$VER" = "1" ]; then
+  ok "首次创建: _seq_no=1, _primary_term=1, _version=1"
+else
+  fail "first create" "seq=$SEQ term=$TERM ver=$VER"
+fi
+
+# 29b. 第二次更新 -> 200, _seq_no=2
+RES=$(curl -s -X PUT "$GO_ES_URL/$OC_IDX/_doc/1" -H 'Content-Type: application/json' -d '{"a":2}')
+SEQ=$(echo "$RES" | jq -r '._seq_no // 0' 2>/dev/null)
+VER=$(echo "$RES" | jq -r '._version // 0' 2>/dev/null)
+if [ "$SEQ" = "2" ] && [ "$VER" = "2" ]; then
+  ok "update: _seq_no=2, _version=2"
+else
+  fail "second write" "seq=$SEQ ver=$VER"
+fi
+
+# 29c. 条件写 if_seq_no=2 (匹配) -> 200
+RES=$(curl -s -X PUT "$GO_ES_URL/$OC_IDX/_doc/1?if_seq_no=2" -H 'Content-Type: application/json' -d '{"a":3}')
+SEQ=$(echo "$RES" | jq -r '._seq_no // 0' 2>/dev/null)
+if [ "$SEQ" = "3" ]; then
+  ok "if_seq_no=2 匹配 -> _seq_no=3"
+else
+  fail "if_seq_no match" "seq=$SEQ"
+fi
+
+# 29d. 条件写 if_seq_no=2 (stale) -> 409
+HTTP_CODE=$(curl -s -o /tmp/_oc_body -w "%{http_code}" -X PUT "$GO_ES_URL/$OC_IDX/_doc/1?if_seq_no=2" -H 'Content-Type: application/json' -d '{"a":4}')
+RES=$(cat /tmp/_oc_body)
+ERR_TYPE=$(echo "$RES" | jq -r '.error.type // ""' 2>/dev/null)
+if [ "$HTTP_CODE" = "409" ] && [ "$ERR_TYPE" = "version_conflict_engine_exception" ]; then
+  ok "stale if_seq_no=2 -> 409 version_conflict"
+else
+  fail "stale if_seq_no" "code=$HTTP_CODE type=$ERR_TYPE body=$RES"
+fi
+
+# 29e. op_type=create 已存在 -> 409
+HTTP_CODE=$(curl -s -o /tmp/_oc_body -w "%{http_code}" -X PUT "$GO_ES_URL/$OC_IDX/_doc/1?op_type=create" -H 'Content-Type: application/json' -d '{"a":5}')
+RES=$(cat /tmp/_oc_body)
+ERR_TYPE=$(echo "$RES" | jq -r '.error.type // ""' 2>/dev/null)
+if [ "$HTTP_CODE" = "409" ] && [ "$ERR_TYPE" = "version_conflict_engine_exception" ]; then
+  ok "op_type=create 重复 -> 409"
+else
+  fail "op_type create conflict" "code=$HTTP_CODE type=$ERR_TYPE"
+fi
+
+# 29f. version_type=external + version=100 -> 200
+RES=$(curl -s -X PUT "$GO_ES_URL/$OC_IDX/_doc/1?version=100&version_type=external" -H 'Content-Type: application/json' -d '{"a":6}')
+VER=$(echo "$RES" | jq -r '._version // 0' 2>/dev/null)
+if [ "$VER" = "100" ]; then
+  ok "version_type=external: _version=100"
+else
+  fail "external version" "ver=$VER"
+fi
+
+# 29g. external_gte 接受更高版本
+RES=$(curl -s -X PUT "$GO_ES_URL/$OC_IDX/_doc/1?version=200&version_type=external_gte" -H 'Content-Type: application/json' -d '{"a":7}')
+VER=$(echo "$RES" | jq -r '._version // 0' 2>/dev/null)
+if [ "$VER" = "200" ]; then
+  ok "external_gte 接受更高: _version=200"
+else
+  fail "external_gte higher" "ver=$VER"
+fi
+
+# 29h. external_gte 拒绝旧版本
+HTTP_CODE=$(curl -s -o /tmp/_oc_body -w "%{http_code}" -X PUT "$GO_ES_URL/$OC_IDX/_doc/1?version=50&version_type=external_gte" -H 'Content-Type: application/json' -d '{"a":8}')
+RES=$(cat /tmp/_oc_body)
+ERR_TYPE=$(echo "$RES" | jq -r '.error.type // ""' 2>/dev/null)
+if [ "$HTTP_CODE" = "409" ] && [ "$ERR_TYPE" = "version_conflict_engine_exception" ]; then
+  ok "external_gte 拒绝旧版本: 409"
+else
+  fail "external_gte reject old" "code=$HTTP_CODE"
+fi
+
+# 29i. GET 返回 _seq_no / _primary_term
+RES=$(curl -s -X GET "$GO_ES_URL/$OC_IDX/_doc/1")
+SEQ=$(echo "$RES" | jq -r '._seq_no // 0' 2>/dev/null)
+TERM=$(echo "$RES" | jq -r '._primary_term // 0' 2>/dev/null)
+if [ "$SEQ" -gt "0" ] && [ "$TERM" -gt "0" ]; then
+  ok "GET 返回 _seq_no=$SEQ, _primary_term=$TERM"
+else
+  fail "GET version" "seq=$SEQ term=$TERM"
+fi
+
+# 29j. POST 自动 id 也走版本控制
+RES=$(curl -s -X POST "$GO_ES_URL/$OC_IDX/_doc" -H 'Content-Type: application/json' -d '{"a":1}')
+SEQ=$(echo "$RES" | jq -r '._seq_no // 0' 2>/dev/null)
+if [ "$SEQ" = "1" ]; then
+  ok "POST 自动 id 也返回 _seq_no=1"
+else
+  fail "POST auto id" "seq=$SEQ"
+fi
+
 # ---------- 13. config 加载 + 热更新 ----------
 header "13. 配置文件加载(无配置应不影响启动)"
 # 自研 server 当前没挂 -config 也能起, 这里通过 /metrics 已包含 go_es_build_info 验证
