@@ -1386,6 +1386,52 @@ else
   fail "search seg after segment" "got=$N"
 fi
 
+# ---------- 32. 结构化访问日志 ----------
+header "32. 结构化访问日志"
+# 32a. 访问 stats 端点 -> 200 + enabled
+RES=$(curl -s -X GET "$GO_ES_URL/_accesslog/stats")
+ENABLED=$(echo "$RES" | jq -r '.enabled // false' 2>/dev/null)
+HAS_STATS=$(echo "$RES" | jq -r '.stats.written // "missing"' 2>/dev/null)
+if [ "$ENABLED" = "true" ] && [ "$HAS_STATS" != "missing" ]; then
+  ok "accesslog stats: enabled=$ENABLED, written=$HAS_STATS"
+else
+  fail "accesslog stats" "enabled=$ENABLED stats=$HAS_STATS body=$RES"
+fi
+
+# 32b. 多次发请求后, written 计数应增加
+W_BEFORE=$(echo "$RES" | jq -r '.stats.written // 0' 2>/dev/null)
+for n in 1 2 3 4 5; do
+  curl -s -X GET "$GO_ES_URL/_cluster/health" >/dev/null
+done
+RES2=$(curl -s -X GET "$GO_ES_URL/_accesslog/stats")
+W_AFTER=$(echo "$RES2" | jq -r '.stats.written // 0' 2>/dev/null)
+if [ "$W_AFTER" -gt "$W_BEFORE" ]; then
+  ok "5 次请求后 written 增加: $W_BEFORE -> $W_AFTER"
+else
+  fail "accesslog count" "$W_BEFORE -> $W_AFTER"
+fi
+
+# 32c. 不同状态码都被记录 (404)
+curl -s -X GET "$GO_ES_URL/nonexistent" >/dev/null
+curl -s -X PUT "$GO_ES_URL/also/missing" -H 'Content-Type: application/json' -d '{}' >/dev/null
+RES3=$(curl -s -X GET "$GO_ES_URL/_accesslog/stats")
+DROPPED=$(echo "$RES3" | jq -r '.stats.dropped // 0' 2>/dev/null)
+W=$(echo "$RES3" | jq -r '.stats.written // 0' 2>/dev/null)
+B=$(echo "$RES3" | jq -r '.stats.bytes // 0' 2>/dev/null)
+if [ "$W" -gt "0" ] && [ "$B" -gt "0" ]; then
+  ok "多状态码请求都被记录: written=$W, bytes=$B, dropped=$DROPPED"
+else
+  fail "accesslog multi-status" "w=$W b=$B d=$DROPPED"
+fi
+
+# 32d. 验证响应 Content-Type 是 JSON
+CT=$(curl -s -o /dev/null -w "%{content_type}" -X GET "$GO_ES_URL/_accesslog/stats")
+if echo "$CT" | grep -q "json"; then
+  ok "stats Content-Type: $CT"
+else
+  fail "accesslog content type" "got=$CT"
+fi
+
 # ---------- 13. config 加载 + 热更新 ----------
 header "13. 配置文件加载(无配置应不影响启动)"
 # 自研 server 当前没挂 -config 也能起, 这里通过 /metrics 已包含 go_es_build_info 验证

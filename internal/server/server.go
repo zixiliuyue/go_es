@@ -56,6 +56,8 @@ type Server struct {
 	wc *WriteCoordinator
 	// SegmentManager 倒排分段
 	seg *SegmentManager
+	// AccessLogger 访问日志
+	accessLog *AccessLogger
 }
 
 // ServerOptions 构造服务端的可选配置
@@ -106,6 +108,12 @@ func NewWithOptions(store *storage.Store, engine *search.Engine, logger *zap.Log
 		MaxBufferBytes:       64 << 20,
 		AutoFlushIntervalSec: 30,
 	}, store, engine)
+	// AccessLogger 初始化 (默认开启, 写 stdout)
+	s.accessLog = NewAccessLogger(AccessLogConfig{
+		Enabled:    true,
+		BufferSize: 10000,
+		SampleRate: 1.0,
+	}, logger)
 	s.router = s.buildRouter()
 	return s
 }
@@ -119,8 +127,8 @@ func (s *Server) MarkStartupDone() { s.startupDone.Store(true) }
 // Handler 返回 net/http.Handler
 func (s *Server) Handler() http.Handler {
 	router := http.HandlerFunc(s.router.ServeHTTP)
-	// 链路顺序: auth (in chainMiddleware) -> rbac -> bodyLimit -> rateLimit -> router
-	return s.guards.chainMiddleware(s.middlewareRBAC(router))
+	// 链路顺序: auth (in chainMiddleware) -> rbac -> accessLog -> bodyLimit -> rateLimit -> router
+	return s.guards.chainMiddleware(s.middlewareAccessLog(s.middlewareRBAC(router)))
 }
 
 // buildRouter 构造路由表
@@ -194,6 +202,9 @@ func (s *Server) buildRouter() *router {
 	rt.addExact("GET", []string{"_health", "liveness"}, s.handleLiveness)
 	rt.addExact("GET", []string{"_health", "readiness"}, s.handleReadiness)
 	rt.addExact("GET", []string{"_health", "startup"}, s.handleStartup)
+
+	// /_accesslog/stats
+	rt.addExact("GET", []string{"_accesslog", "stats"}, s.handleAccessLogStats)
 
 	// /metrics  Prometheus 抓取端点
 	rt.addExact("GET", []string{"metrics"}, s.handleMetrics)
