@@ -1432,6 +1432,83 @@ else
   fail "accesslog content type" "got=$CT"
 fi
 
+# ---------- 33. 健康端点深化 ----------
+header "33. 健康端点深化"
+# 33a. /_health/status 返回完整 JSON, 含 state + components
+RES=$(curl -s -X GET "$GO_ES_URL/_health/status")
+STATE=$(echo "$RES" | jq -r '.state_name // "missing"' 2>/dev/null)
+HAS_COMPONENTS=$(echo "$RES" | jq -r '.components | length // 0' 2>/dev/null)
+CLUSTER=$(echo "$RES" | jq -r '.cluster // ""' 2>/dev/null)
+UPTIME=$(echo "$RES" | jq -r '.uptime_sec // -1' 2>/dev/null)
+if [ "$STATE" = "ready" ] && [ "$HAS_COMPONENTS" -ge "5" ] && [ "$CLUSTER" = "go_es_cluster" ] && [ "$UPTIME" -ge "0" ]; then
+  ok "status: state=$STATE, components=$HAS_COMPONENTS, cluster=$CLUSTER, uptime=${UPTIME}s"
+else
+  fail "health status" "state=$STATE comp=$HAS_COMPONENTS cluster=$CLUSTER uptime=$UPTIME"
+fi
+
+# 33b. /_health/components 单独返回
+RES=$(curl -s -X GET "$GO_ES_URL/_health/components")
+HAS_COMP=$(echo "$RES" | jq -r '.components | length // 0' 2>/dev/null)
+if [ "$HAS_COMP" -ge "5" ]; then
+  ok "/_health/components 含 $HAS_COMP 个 component"
+else
+  fail "health components" "got $HAS_COMP"
+fi
+
+# 33c. 各 component 含 status 字段
+STORAGE_STATUS=$(echo "$RES" | jq -r '.components[] | select(.name=="storage") | .status' 2>/dev/null)
+ENGINE_STATUS=$(echo "$RES" | jq -r '.components[] | select(.name=="engine") | .status' 2>/dev/null)
+if [ "$STORAGE_STATUS" = "up" ] && [ "$ENGINE_STATUS" = "up" ]; then
+  ok "storage=$STORAGE_STATUS, engine=$ENGINE_STATUS"
+else
+  fail "component status" "storage=$STORAGE_STATUS engine=$ENGINE_STATUS"
+fi
+
+# 33d. storage latency 字段存在
+STORAGE_LAT=$(echo "$RES" | jq -r '.components[] | select(.name=="storage") | (.latency_ms // "missing") | tostring' 2>/dev/null)
+if [ "$STORAGE_LAT" != "missing" ] && [ "$STORAGE_LAT" -ge "0" ] 2>/dev/null; then
+  ok "storage latency_ms=$STORAGE_LAT (含延迟指标)"
+else
+  fail "storage latency" "got=$STORAGE_LAT"
+fi
+
+# 33e. liveness 仍 200
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X GET "$GO_ES_URL/_health/liveness")
+if [ "$HTTP_CODE" = "200" ]; then
+  ok "liveness 仍 200"
+else
+  fail "liveness" "code=$HTTP_CODE"
+fi
+
+# 33f. readiness 仍 200 (ready 状态)
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X GET "$GO_ES_URL/_health/readiness")
+if [ "$HTTP_CODE" = "200" ]; then
+  ok "readiness 200 (ready 状态)"
+else
+  fail "readiness" "code=$HTTP_CODE"
+fi
+
+# 33g. startup 200
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X GET "$GO_ES_URL/_health/startup")
+if [ "$HTTP_CODE" = "200" ]; then
+  ok "startup 200 (已启动)"
+else
+  fail "startup" "code=$HTTP_CODE"
+fi
+
+# 33h. 缓存生效: 快速连发 10 次, latency < 200ms 总
+START_MS=$(date +%s%3N)
+for i in $(seq 1 10); do
+  curl -s -X GET "$GO_ES_URL/_health/status" >/dev/null
+done
+END_MS=$(date +%s%3N)
+ELAPSED=$((END_MS - START_MS))
+if [ "$ELAPSED" -lt "500" ]; then
+  ok "10 次 status 端点总耗时 ${ELAPSED}ms (有缓存)"
+else
+  fail "status cache" "elapsed=$ELAPSED ms"
+fi
+
 # ---------- 13. config 加载 + 热更新 ----------
 header "13. 配置文件加载(无配置应不影响启动)"
 # 自研 server 当前没挂 -config 也能起, 这里通过 /metrics 已包含 go_es_build_info 验证

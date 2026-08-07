@@ -58,6 +58,9 @@ type Server struct {
 	seg *SegmentManager
 	// AccessLogger 访问日志
 	accessLog *AccessLogger
+	// HealthChecker 健康检查
+	healthChecker *HealthChecker
+	healthCheckerMu sync.Mutex
 }
 
 // ServerOptions 构造服务端的可选配置
@@ -114,6 +117,11 @@ func NewWithOptions(store *storage.Store, engine *search.Engine, logger *zap.Log
 		BufferSize: 10000,
 		SampleRate: 1.0,
 	}, logger)
+	// 启动状态 + 健康检查
+	s.healthChecker = NewHealthChecker()
+	s.healthChecker.SetState(HealthReady)
+	// 简化: 启动即 ready
+	s.startupDone.Store(true)
 	s.router = s.buildRouter()
 	return s
 }
@@ -202,6 +210,9 @@ func (s *Server) buildRouter() *router {
 	rt.addExact("GET", []string{"_health", "liveness"}, s.handleLiveness)
 	rt.addExact("GET", []string{"_health", "readiness"}, s.handleReadiness)
 	rt.addExact("GET", []string{"_health", "startup"}, s.handleStartup)
+	// /_health/status 与 /_health/components  完整健康报告
+	rt.addExact("GET", []string{"_health", "status"}, s.handleHealthStatus)
+	rt.addExact("GET", []string{"_health", "components"}, s.handleHealthComponents)
 
 	// /_accesslog/stats
 	rt.addExact("GET", []string{"_accesslog", "stats"}, s.handleAccessLogStats)

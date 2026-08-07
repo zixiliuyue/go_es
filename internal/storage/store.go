@@ -175,6 +175,15 @@ func (s *Store) Exists(key []byte) (bool, error) {
 	return found, nil
 }
 
+// Ping 轻量健康检查 (View 一遍数据库)
+func (s *Store) Ping() error {
+	return s.db.View(func(txn *badger.Txn) error {
+		// 读 meta 探测 (Key 不存在也 ok, View 失败才算 down)
+		_, _ = txn.Get([]byte("__ping__"))
+		return nil
+	})
+}
+
 // WithTransaction 在一个读写事务内执行操作
 // 适用于需要"读-改-写"原子性的场景(如更新别名+索引元信息)
 func (s *Store) WithTransaction(fn func(txn *badger.Txn) error) error {
