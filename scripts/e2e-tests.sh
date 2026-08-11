@@ -1714,6 +1714,336 @@ assert_status "restore missing snapshot -> 404" 404 POST "$GO_ES_URL/_snapshot/$
 # 35m. 删除快照仓库
 assert_status "delete snapshot repo" 200 DELETE "$GO_ES_URL/_snapshot/$SNAP_REPO"
 
+# ---------- 36. 慢查询日志端点 ----------
+header "36. 慢查询日志端点 /_slowlog/*"
+
+# 36a. GET /_slowlog/stats -> 200, 返回 JSON 格式
+RES=$(curl -s -X GET "$GO_ES_URL/_slowlog/stats")
+SLOW_COUNT=$(echo "$RES" | jq -r '.slow_count // 0' 2>/dev/null)
+MAX_DUR=$(echo "$RES" | jq -r '.max_duration_ms // 0' 2>/dev/null)
+THRESHOLD=$(echo "$RES" | jq -r '.threshold_ms // 0' 2>/dev/null)
+if [ "$THRESHOLD" -gt "0" ] 2>/dev/null && [ -n "$SLOW_COUNT" ]; then
+  ok "slowlog stats: threshold_ms=$THRESHOLD, slow_count=$SLOW_COUNT, max_duration_ms=$MAX_DUR"
+else
+  fail "slowlog stats" "threshold=$THRESHOLD slow_count=$SLOW_COUNT body=$RES"
+fi
+
+# 36b. GET /_slowlog/stats Content-Type 验证
+CT=$(curl -s -o /dev/null -w "%{content_type}" -X GET "$GO_ES_URL/_slowlog/stats")
+if echo "$CT" | grep -q "json"; then
+  ok "slowlog stats Content-Type: $CT"
+else
+  fail "slowlog content type" "got=$CT"
+fi
+
+# 36c. PUT /_slowlog/config 设置有效阈值 -> 200
+assert_status "slowlog config valid -> 200" 200 PUT "$GO_ES_URL/_slowlog/config" \
+  '{"threshold_ms":2000}' "application/json"
+assert_contains "slowlog config 响应含 updated" '"updated"' /tmp/last.json
+assert_contains "slowlog config 响应含 threshold_ms" '"threshold_ms"' /tmp/last.json
+
+# 36d. 验证阈值确实被更新
+RES=$(curl -s -X GET "$GO_ES_URL/_slowlog/stats")
+NEW_THRESHOLD=$(echo "$RES" | jq -r '.threshold_ms // 0' 2>/dev/null)
+if [ "$NEW_THRESHOLD" = "2000" ]; then
+  ok "slowlog threshold 更新为 2000ms"
+else
+  fail "slowlog threshold update" "got=$NEW_THRESHOLD"
+fi
+
+# 36e. PUT /_slowlog/config 设置无效阈值(0) -> 400
+assert_status "slowlog config threshold=0 -> 400" 400 PUT "$GO_ES_URL/_slowlog/config" \
+  '{"threshold_ms":0}' "application/json"
+
+# 36f. PUT /_slowlog/config 设置超大阈值(60001) -> 400
+assert_status "slowlog config threshold=60001 -> 400" 400 PUT "$GO_ES_URL/_slowlog/config" \
+  '{"threshold_ms":60001}' "application/json"
+
+# 36g. PUT /_slowlog/config 非 JSON -> 400
+assert_status "slowlog config bad JSON -> 400" 400 PUT "$GO_ES_URL/_slowlog/config" \
+  'not json' "application/json"
+
+# 36h. POST /_slowlog/reset -> 200
+assert_status "slowlog reset -> 200" 200 POST "$GO_ES_URL/_slowlog/reset"
+assert_contains "slowlog reset 响应含 reset" '"reset"' /tmp/last.json
+
+# 36i. 验证 reset 后 slow_count 归零
+RES=$(curl -s -X GET "$GO_ES_URL/_slowlog/stats")
+RESET_COUNT=$(echo "$RES" | jq -r '.slow_count // -1' 2>/dev/null)
+if [ "$RESET_COUNT" = "0" ]; then
+  ok "slowlog reset 后 slow_count=0"
+else
+  fail "slowlog reset count" "got=$RESET_COUNT (expect 0)"
+fi
+
+# 36j. 验证 reset 后 max_duration_ms 归零
+RESET_MAX=$(echo "$RES" | jq -r '.max_duration_ms // -1' 2>/dev/null)
+if [ "$RESET_MAX" = "0" ]; then
+  ok "slowlog reset 后 max_duration_ms=0"
+else
+  fail "slowlog reset max" "got=$RESET_MAX (expect 0)"
+fi
+
+# 36k. 错误方法检测: GET /_slowlog/config -> 405
+assert_status "slowlog config GET -> 405" 405 GET "$GO_ES_URL/_slowlog/config"
+
+# 36l. 错误方法检测: GET /_slowlog/reset -> 405
+assert_status "slowlog reset GET -> 405" 405 GET "$GO_ES_URL/_slowlog/reset"
+
+# ---------- 37. 审计日志端点 ----------
+header "37. 审计日志端点 /_audit/*"
+
+# 37a. GET /_audit/stats -> 200 (默认审计已初始化但 disabled)
+assert_status "audit stats -> 200" 200 GET "$GO_ES_URL/_audit/stats"
+AUDIT_ENABLED=$(cat /tmp/last.json | jq -r '.enabled // "missing"' 2>/dev/null)
+AUDIT_HAS_STATS=$(cat /tmp/last.json | jq 'has("stats")' 2>/dev/null)
+if [ "$AUDIT_ENABLED" = "false" ] && [ "$AUDIT_HAS_STATS" = "true" ]; then
+  ok "audit stats: enabled=$AUDIT_ENABLED, has_stats=true"
+else
+  fail "audit stats" "enabled=$AUDIT_ENABLED has_stats=$AUDIT_HAS_STATS"
+fi
+
+# 37b. 审计 stats 响应格式验证
+assert_contains "audit stats 含 total_entries" 'total_entries' /tmp/last.json
+assert_contains "audit stats 含 create_ops" 'create_ops' /tmp/last.json
+assert_contains "audit stats 含 delete_ops" 'delete_ops' /tmp/last.json
+
+# 37c. GET /_audit (未启用审计) -> 503
+assert_status "audit query (disabled) -> 503" 503 GET "$GO_ES_URL/_audit"
+
+# 37d. PUT /_audit/config 启用审计 -> 200
+assert_status "audit config enable -> 200" 200 PUT "$GO_ES_URL/_audit/config" \
+  '{"enabled":true}' "application/json"
+assert_contains "audit config 响应含 enabled" '"enabled"' /tmp/last.json
+
+# 37e. 验证审计已启用
+RES=$(curl -s -X GET "$GO_ES_URL/_audit/stats")
+AUDIT_ENABLED_NOW=$(echo "$RES" | jq -r '.enabled // false' 2>/dev/null)
+if [ "$AUDIT_ENABLED_NOW" = "true" ]; then
+  ok "audit 已启用: enabled=$AUDIT_ENABLED_NOW"
+else
+  fail "audit enable" "got=$AUDIT_ENABLED_NOW"
+fi
+
+# 37f. 触发写操作, 让审计记录条目
+TS_AUDIT=$(date +%s)
+AUDIT_IDX="audit_${TS_AUDIT}"
+curl -s -X PUT "$GO_ES_URL/$AUDIT_IDX" >/dev/null
+for n in 1 2 3; do
+  curl -s -X PUT "$GO_ES_URL/$AUDIT_IDX/_doc/$n" -H 'Content-Type: application/json' \
+    -d "{\"v\":$n}" >/dev/null
+done
+# 触发一次删除
+curl -s -X DELETE "$GO_ES_URL/$AUDIT_IDX/_doc/1" >/dev/null
+
+# 37g. 验证审计 stats 有记录
+sleep 0.3
+RES=$(curl -s -X GET "$GO_ES_URL/_audit/stats")
+TOTAL_ENTRIES=$(echo "$RES" | jq -r '.stats.total_entries // 0' 2>/dev/null)
+CREATE_OPS=$(echo "$RES" | jq -r '.stats.create_ops // 0' 2>/dev/null)
+DELETE_OPS=$(echo "$RES" | jq -r '.stats.delete_ops // 0' 2>/dev/null)
+if [ "$TOTAL_ENTRIES" -ge "4" ] 2>/dev/null; then
+  ok "审计已记录 $TOTAL_ENTRIES 条目 (create=$CREATE_OPS, delete=$DELETE_OPS)"
+else
+  fail "audit entries" "total=$TOTAL_ENTRIES create=$CREATE_OPS delete=$DELETE_OPS"
+fi
+
+# 37h. GET /_audit (已启用审计) -> 200
+assert_status "audit query (enabled) -> 200" 200 GET "$GO_ES_URL/_audit"
+
+# 37i. 审计查询响应格式验证
+assert_contains "audit query 含 stats" '"stats"' /tmp/last.json
+assert_contains "audit query 含 filters" '"filters"' /tmp/last.json
+assert_contains "audit query 含 note" '"note"' /tmp/last.json
+
+# 37j. GET /_audit 带 limit 参数
+assert_status "audit query with limit -> 200" 200 GET "$GO_ES_URL/_audit?limit=10"
+LIMIT_VAL=$(cat /tmp/last.json | jq -r '.limit // 0' 2>/dev/null)
+if [ "$LIMIT_VAL" = "10" ]; then
+  ok "audit query limit 参数生效: limit=$LIMIT_VAL"
+else
+  fail "audit limit" "got=$LIMIT_VAL"
+fi
+
+# 37k. GET /_audit 带非法 since 参数 -> 400
+assert_status "audit query invalid since -> 400" 400 GET "$GO_ES_URL/_audit?since=bad-date"
+
+# 37l. PUT /_audit/config 禁用审计 -> 200
+assert_status "audit config disable -> 200" 200 PUT "$GO_ES_URL/_audit/config" \
+  '{"enabled":false}' "application/json"
+
+# 37m. 验证审计已禁用
+RES=$(curl -s -X GET "$GO_ES_URL/_audit/stats")
+AUDIT_DISABLED=$(echo "$RES" | jq -r '.enabled // true' 2>/dev/null)
+if [ "$AUDIT_DISABLED" = "false" ]; then
+  ok "审计已禁用: enabled=$AUDIT_DISABLED"
+else
+  fail "audit disable" "got=$AUDIT_DISABLED"
+fi
+
+# 37n. GET /_audit (禁用后) -> 503
+assert_status "audit query (re-disabled) -> 503" 503 GET "$GO_ES_URL/_audit"
+
+# 37o. PUT /_audit/config 非 JSON -> 400
+assert_status "audit config bad JSON -> 400" 400 PUT "$GO_ES_URL/_audit/config" \
+  'not json' "application/json"
+
+# 37p. 错误方法: POST /_audit/stats -> 405
+assert_status "audit stats POST -> 405" 405 POST "$GO_ES_URL/_audit/stats"
+
+# ---------- 38. pprof 端点 ----------
+header "38. pprof 端点 /_debug/pprof/*"
+
+# 38a. GET /_debug/pprof (索引页) -> 200
+assert_status "pprof index -> 200" 200 GET "$GO_ES_URL/_debug/pprof"
+assert_contains "pprof index 含 endpoints 列表" 'pprof endpoints' /tmp/last.json
+assert_contains "pprof index 含 goroutine" 'goroutine' /tmp/last.json
+assert_contains "pprof index 含 heap" 'heap' /tmp/last.json
+assert_contains "pprof index 含 cmdline" 'cmdline' /tmp/last.json
+
+# 38b. GET /_debug/pprof/cmdline -> 200 (非空响应体)
+assert_status "pprof cmdline -> 200" 200 GET "$GO_ES_URL/_debug/pprof/cmdline"
+CMD_BODY_LEN=$(cat /tmp/last.json | wc -c | tr -d ' ')
+if [ "$CMD_BODY_LEN" -gt "0" ] 2>/dev/null; then
+  ok "pprof cmdline 非空 (${CMD_BODY_LEN}B)"
+else
+  fail "pprof cmdline body" "empty body"
+fi
+
+# 38c. GET /_debug/pprof/profile?seconds=1 -> 200 (CPU profile)
+assert_status "pprof profile -> 200" 200 GET "$GO_ES_URL/_debug/pprof/profile?seconds=1"
+PROFILE_LEN=$(cat /tmp/last.json | wc -c | tr -d ' ')
+if [ "$PROFILE_LEN" -gt "0" ] 2>/dev/null; then
+  ok "pprof profile 非空 (${PROFILE_LEN}B)"
+else
+  fail "pprof profile body" "empty body"
+fi
+
+# 38d. GET /_debug/pprof/goroutine -> 200
+assert_status "pprof goroutine -> 200" 200 GET "$GO_ES_URL/_debug/pprof/goroutine"
+GOROUTINE_LEN=$(cat /tmp/last.json | wc -c | tr -d ' ')
+if [ "$GOROUTINE_LEN" -gt "0" ] 2>/dev/null; then
+  ok "pprof goroutine 非空 (${GOROUTINE_LEN}B)"
+else
+  fail "pprof goroutine body" "empty body"
+fi
+
+# 38e. GET /_debug/pprof/heap -> 200
+assert_status "pprof heap -> 200" 200 GET "$GO_ES_URL/_debug/pprof/heap"
+HEAP_LEN=$(cat /tmp/last.json | wc -c | tr -d ' ')
+if [ "$HEAP_LEN" -gt "0" ] 2>/dev/null; then
+  ok "pprof heap 非空 (${HEAP_LEN}B)"
+else
+  fail "pprof heap body" "empty body"
+fi
+
+# 38f. GET /_debug/pprof/threadcreate -> 200
+assert_status "pprof threadcreate -> 200" 200 GET "$GO_ES_URL/_debug/pprof/threadcreate"
+THREAD_LEN=$(cat /tmp/last.json | wc -c | tr -d ' ')
+if [ "$THREAD_LEN" -gt "0" ] 2>/dev/null; then
+  ok "pprof threadcreate 非空 (${THREAD_LEN}B)"
+else
+  fail "pprof threadcreate body" "empty body"
+fi
+
+# 38g. GET /_debug/pprof/allocs -> 200
+assert_status "pprof allocs -> 200" 200 GET "$GO_ES_URL/_debug/pprof/allocs"
+ALLOCS_LEN=$(cat /tmp/last.json | wc -c | tr -d ' ')
+if [ "$ALLOCS_LEN" -gt "0" ] 2>/dev/null; then
+  ok "pprof allocs 非空 (${ALLOCS_LEN}B)"
+else
+  fail "pprof allocs body" "empty body"
+fi
+
+# 38h. GET /_debug/pprof/block -> 200
+assert_status "pprof block -> 200" 200 GET "$GO_ES_URL/_debug/pprof/block"
+
+# 38i. GET /_debug/pprof/mutex -> 200
+assert_status "pprof mutex -> 200" 200 GET "$GO_ES_URL/_debug/pprof/mutex"
+
+# 38j. GET /_debug/pprof/symbol -> 200
+assert_status "pprof symbol -> 200" 200 GET "$GO_ES_URL/_debug/pprof/symbol"
+
+# 38k. 验证 pprof 端点 Content-Type (profile 端点返回二进制)
+CT_PROFILE=$(curl -s -o /dev/null -w "%{content_type}" -X GET "$GO_ES_URL/_debug/pprof/profile?seconds=1")
+# profile 返回 application/octet-stream, 其他返回 text/plain
+if echo "$CT_PROFILE" | grep -q "octet-stream"; then
+  ok "pprof profile Content-Type=$CT_PROFILE (application/octet-stream)"
+else
+  fail "pprof profile Content-Type" "got=$CT_PROFILE expect=application/octet-stream"
+fi
+
+# ---------- 39. 运行时统计与配置热加载 ----------
+header "39. 运行时统计 /_stats 与配置热加载 /_config/reload"
+
+# 39a. GET /_stats -> 200
+assert_status "/_stats -> 200" 200 GET "$GO_ES_URL/_stats"
+RES=$(cat /tmp/last.json)
+
+# 39b. /_stats 响应含 goroutines 字段
+GOROUTINES=$(echo "$RES" | jq -r '.goroutines // 0' 2>/dev/null)
+if [ "$GOROUTINES" -gt "0" ] 2>/dev/null; then
+  ok "/_stats goroutines=$GOROUTINES (>0)"
+else
+  fail "/_stats goroutines" "got=$GOROUTINES"
+fi
+
+# 39c. /_stats 响应含 memory 子对象
+HAS_MEM=$(echo "$RES" | jq 'has("memory")' 2>/dev/null)
+if [ "$HAS_MEM" = "true" ]; then
+  ok "/_stats 含 memory 子对象"
+else
+  fail "/_stats memory" "missing"
+fi
+
+# 39d. /_stats memory 含 alloc 字段
+MEM_ALLOC=$(echo "$RES" | jq -r '.memory.alloc // 0' 2>/dev/null)
+if [ "$MEM_ALLOC" -gt "0" ] 2>/dev/null; then
+  ok "/_stats memory.alloc=$MEM_ALLOC (>0)"
+else
+  fail "/_stats memory.alloc" "got=$MEM_ALLOC"
+fi
+
+# 39e. /_stats 含 go_version
+GO_VER=$(echo "$RES" | jq -r '.go_version // ""' 2>/dev/null)
+if [ -n "$GO_VER" ]; then
+  ok "/_stats go_version=$GO_VER"
+else
+  fail "/_stats go_version" "missing"
+fi
+
+# 39f. /_stats 含 num_cpu
+NUM_CPU=$(echo "$RES" | jq -r '.num_cpu // 0' 2>/dev/null)
+if [ "$NUM_CPU" -gt "0" ] 2>/dev/null; then
+  ok "/_stats num_cpu=$NUM_CPU"
+else
+  fail "/_stats num_cpu" "got=$NUM_CPU"
+fi
+
+# 39g. POST /_config/reload -> 200
+assert_status "config reload -> 200" 200 POST "$GO_ES_URL/_config/reload"
+
+# 39h. config reload 响应含 status 字段
+assert_contains "config reload 含 status" '"status"' /tmp/last.json
+assert_contains "config reload 含 reloaded_at" '"reloaded_at"' /tmp/last.json
+
+# 39i. 验证 reload 响应 status=reloaded
+RELOAD_STATUS=$(cat /tmp/last.json | jq -r '.status // ""' 2>/dev/null)
+if [ "$RELOAD_STATUS" = "reloaded" ]; then
+  ok "config reload status=reloaded"
+else
+  fail "config reload status" "got=$RELOAD_STATUS"
+fi
+
+# 39j. 错误方法: GET /_config/reload -> 405
+assert_status "config reload GET -> 405" 405 GET "$GO_ES_URL/_config/reload"
+
+# 39k. 错误方法: PUT /_config/reload -> 405
+assert_status "config reload PUT -> 405" 405 PUT "$GO_ES_URL/_config/reload"
+
+# 39l. 错误方法: DELETE /_config/reload -> 405
+assert_status "config reload DELETE -> 405" 405 DELETE "$GO_ES_URL/_config/reload"
+
 # ---------- 总结 ----------
 echo
 printf "${YELLOW}== 总结 ==${NC}\n"

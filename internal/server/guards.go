@@ -95,12 +95,16 @@ func (s *ShutdownState) Track() func() {
 
 // guards 集中管理本文件所有可观测/守卫依赖
 type guards struct {
-	logger   *zap.Logger
-	metrics  *ServerMetrics
-	shutdown *ShutdownState
-	auth     AuthConfig
-	limit    LimitConfig
-	limiter  *ipLimiter
+	logger    *zap.Logger
+	metrics   *ServerMetrics
+	shutdown  *ShutdownState
+	auth      AuthConfig
+	limit     LimitConfig
+	limiter   *ipLimiter
+	// tokenValidator 会话 Token 校验函数(由 Server 注入)
+	tokenValidator func(token string) (string, bool)
+	// tracerProvider 追踪提供者 (由 Server 注入)
+	tracerProvider *TracerProvider
 }
 
 // newGuards 构造守卫
@@ -120,6 +124,7 @@ func newGuards(logger *zap.Logger, metrics *ServerMetrics, shutdown *ShutdownSta
 }
 
 // chainMiddleware 按顺序包装
+// 从外到内: trace -> recover -> shutdown -> metrics -> requestID -> auth -> rateLimit -> bodyLimit -> router
 func (g *guards) chainMiddleware(h http.Handler) http.Handler {
 	out := h
 	// body 限制(贴近业务, 让认证/health 端点不受影响)
@@ -140,9 +145,107 @@ func (g *guards) chainMiddleware(h http.Handler) http.Handler {
 	out = g.middlewareMetrics(out)
 	// 关闭探测(若已 MarkShuttingDown, 拒绝新连接)
 	out = g.middlewareShutdown(out)
-	// panic recover 最外层
+	// panic recover
 	out = g.middlewareRecover(out)
+	// trace context 透传 (最外层, 包裹整个请求生命周期)
+	if g.tracerProvider != nil && g.tracerProvider.IsEnabled() {
+		out = g.middlewareTrace(out)
+	}
 	return out
+}
+
+// middlewareTrace OpenTelemetry trace context 透传
+// - 入站: 从请求头提取 W3C/B3 trace context, 创建 Span 并注入 context
+// - 出站: 在响应头注入 traceparent/b3, 供下游服务继续透传
+// - 日志: 关联 trace_id / span_id 到现有结构化日志
+func (g *guards) middlewareTrace(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tp := g.tracerProvider
+		if tp == nil || !tp.IsEnabled() {
+			h.ServeHTTP(w, r)
+			return
+		}
+
+		tracer := tp.Tracer("http")
+
+		// 从请求头提取远程 TraceContext
+		var spanOpts []SpanStartOption
+		if tc, ok := TraceContextFromHeaders(r.Header); ok {
+			spanOpts = append(spanOpts, WithSpanRemoteContext(tc))
+		}
+
+		spanName := r.Method + " " + r.URL.Path
+		ctx, span := tracer.StartSpan(r.Context(), spanName,
+			append(spanOpts,
+				WithSpanKind(SpanKindServer),
+				WithSpanAttribute("http.method", r.Method),
+				WithSpanAttribute("http.url", r.URL.String()),
+				WithSpanAttribute("http.host", r.Host),
+				WithSpanAttribute("user_agent", r.UserAgent()),
+			)...,
+		)
+
+		if span != nil {
+			defer span.End()
+		}
+
+		// 将 trace context 注入响应头 (用于下游服务透传)
+		if span != nil {
+			tidBytes, _ := hex.DecodeString(span.TraceIDString())
+			sidBytes, _ := hex.DecodeString(span.SpanIDString())
+			tc := TraceContext{
+				Flags:   TraceFlags(0x01),
+				Sampled: true,
+			}
+			copy(tc.TraceID[:], tidBytes)
+			copy(tc.SpanID[:], sidBytes)
+			TraceContextToHeaders(w.Header(), tc, tp.Config().Propagation)
+
+			// 日志: 关联 trace_id / span_id
+			g.logger.Debug("trace context propagated",
+				zap.String("trace_id", span.TraceIDString()),
+				zap.String("span_id", span.SpanIDString()),
+				zap.String("span_name", spanName))
+		}
+
+		// 包装 ResponseWriter 以捕获状态码
+		rw := &traceResponseWriter{ResponseWriter: w, span: span}
+
+		h.ServeHTTP(rw, r.WithContext(ctx))
+
+		// 更新 span 状态
+		if span != nil {
+			status := rw.StatusCode
+			if status >= 500 {
+				span.SetStatus(SpanStatusError)
+				span.SetAttribute("http.status_code", fmt.Sprintf("%d", status))
+			} else if status == 404 {
+				span.SetStatus(SpanStatusNotFound)
+				span.SetAttribute("http.status_code", fmt.Sprintf("%d", status))
+			} else {
+				span.SetAttribute("http.status_code", fmt.Sprintf("%d", status))
+			}
+		}
+	})
+}
+
+// traceResponseWriter 包装 ResponseWriter 以捕获状态码
+type traceResponseWriter struct {
+	http.ResponseWriter
+	StatusCode int
+	span       *Span
+}
+
+func (rw *traceResponseWriter) WriteHeader(code int) {
+	rw.StatusCode = code
+	rw.ResponseWriter.WriteHeader(code)
+}
+
+func (rw *traceResponseWriter) Write(b []byte) (int, error) {
+	if rw.StatusCode == 0 {
+		rw.StatusCode = http.StatusOK
+	}
+	return rw.ResponseWriter.Write(b)
 }
 
 // middlewareRecover 把 panic 转成 500 + JSON
@@ -250,6 +353,16 @@ func (g *guards) middlewareAuth(h http.Handler) http.Handler {
 func (g *guards) authenticate(r *http.Request) (string, bool) {
 	hdr := r.Header.Get("Authorization")
 	if hdr == "" {
+		return "", false
+	}
+	// Bearer token (会话管理)
+	if strings.HasPrefix(hdr, "Bearer ") {
+		token := strings.TrimPrefix(hdr, "Bearer ")
+		if g.tokenValidator != nil {
+			if user, ok := g.tokenValidator(token); ok {
+				return user, true
+			}
+		}
 		return "", false
 	}
 	// ApiKey xxx
@@ -372,7 +485,7 @@ func isHealthPath(p string) bool {
 	return false
 }
 
-// isPublicPath 任何不需要认证与限速的路径(健康 + 监控 + UI)
+// isPublicPath 任何不需要认证与限速的路径(健康 + 监控 + UI + 登录)
 func isPublicPath(p string) bool {
 	if isHealthPath(p) {
 		return true
@@ -380,7 +493,12 @@ func isPublicPath(p string) bool {
 	switch p {
 	case "/metrics",
 		"/_ui",
-		"/_ui/index.html":
+		"/_ui/index.html",
+		"/_ui/admin.html",
+		"/_security/login",
+		"/_security/logout",
+		"/_security/logout_all",
+		"/_cluster/health":
 		return true
 	}
 	return false

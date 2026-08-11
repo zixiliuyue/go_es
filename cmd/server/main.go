@@ -49,6 +49,10 @@ func main() {
 	tlsHTTP2 := flag.Bool("tls.enable-http2", true, "negotiate h2 on TLS (requires -tls.cert/-tls.key)")
 	tlsClientCA := flag.String("tls.client-ca", "", "client CA pool file (PEM); enables mTLS when combined with -tls.cert/-tls.key/-tls.client-auth")
 	tlsClientAuth := flag.String("tls.client-auth", "none", "client cert enforcement: none|request|require_any|require_verify (mTLS mode)")
+	sessionEnabled := flag.Bool("session.enabled", false, "enable session management (token-based auth with login/logout)")
+	sessionTimeout := flag.Duration("session.timeout", 24*time.Hour, "session timeout duration (e.g. 1h, 24h)")
+	sessionMaxSessions := flag.Int("session.max-sessions", 5, "max concurrent sessions per user (0 = unlimited)")
+	sessionSecret := flag.String("session.secret", "", "HMAC signing key for session tokens (empty = auto-generated)")
 	flag.Parse()
 
 	logger, _ := zap.NewDevelopment()
@@ -180,9 +184,26 @@ func main() {
 		limit.RatePerSecond = cfg.Limit.RatePerSecond
 	}
 
+	// 会话管理配置: -config 优先, 其次命令行 flag
+	sessionCfg := server.SessionConfig{
+		Enabled:         *sessionEnabled,
+		Timeout:         *sessionTimeout,
+		MaxSessions:     *sessionMaxSessions,
+		Secret:          *sessionSecret,
+		CleanupInterval: 5 * time.Minute,
+	}
+	if cfg := loader.Get(); cfg.Session.Enabled {
+		sessionCfg = cfg.Session
+		if *sessionEnabled {
+			sessionCfg.Enabled = true
+		}
+	}
+
 	srv := server.NewWithOptions(store, engine, logger, server.ServerOptions{
-		Auth:  auth,
-		Limit: limit,
+		Auth:         auth,
+		Limit:        limit,
+		ConfigLoader: loader,
+		Session:      sessionCfg,
 	})
 	srv.MarkStartupDone()
 	httpSrv := &http.Server{
@@ -209,7 +230,10 @@ func main() {
 			zap.Bool("tls", tlsOn),
 			zap.Bool("tls_h2", tlsOn && *tlsHTTP2),
 			zap.Bool("mtls", tlsOn && *tlsClientCA != ""),
-			zap.String("client_auth", string(clientAuthVal)))
+			zap.String("client_auth", string(clientAuthVal)),
+			zap.Bool("session_enabled", sessionCfg.Enabled),
+			zap.Duration("session_timeout", sessionCfg.Timeout),
+			zap.Int("session_max_sessions", sessionCfg.MaxSessions))
 		var serveErr error
 		if tlsOn {
 			serveErr = httpSrv.ListenAndServeTLS(*tlsCert, *tlsKey)

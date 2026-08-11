@@ -118,7 +118,12 @@ func (rt *router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // lookup 在路由表中查找 method+parts
 // 其中 parts 中的 {xxx} 段视为通配(任意单段)
+// 优先匹配不含变量的精确路由, 再匹配含变量的路由
 func (rt *router) lookup(method string, parts []string) (routeEntry, http.HandlerFunc) {
+	var bestEntry routeEntry
+	var bestHandler http.HandlerFunc
+	bestHasVar := false
+
 	for key, e := range rt.exact {
 		kmethod, kparts := splitKey(key)
 		if kmethod != method {
@@ -128,8 +133,10 @@ func (rt *router) lookup(method string, parts []string) (routeEntry, http.Handle
 			continue
 		}
 		ok := true
+		hasVar := false
 		for i := range kparts {
 			if isVar(kparts[i]) {
+				hasVar = true
 				continue
 			}
 			if kparts[i] != parts[i] {
@@ -138,10 +145,18 @@ func (rt *router) lookup(method string, parts []string) (routeEntry, http.Handle
 			}
 		}
 		if ok {
-			return e, e.handler
+			if !hasVar {
+				// 精确匹配优先, 立即返回
+				return e, e.handler
+			}
+			if !bestHasVar {
+				bestEntry = e
+				bestHandler = e.handler
+				bestHasVar = true
+			}
 		}
 	}
-	return routeEntry{}, nil
+	return bestEntry, bestHandler
 }
 
 // splitKey 把 makeKey 拼出的字符串拆回 (method, parts)

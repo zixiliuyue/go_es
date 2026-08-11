@@ -51,6 +51,8 @@ type AccessLogEntry struct {
 	ResponseSize int64  `json:"response_size,omitempty"`
 	UserAgent    string `json:"user_agent,omitempty"`
 	Username     string `json:"username,omitempty"`
+	TraceID      string `json:"trace_id,omitempty"`
+	SpanID       string `json:"span_id,omitempty"`
 }
 
 // AccessLogger 访问日志器
@@ -193,6 +195,7 @@ func (s *Server) middlewareAccessLog(h http.Handler) http.Handler {
 		if route == "" {
 			route = normalizeRoute(r.URL.Path)
 		}
+		traceID, spanID := TraceInfoFromContext(r.Context())
 		entry := AccessLogEntry{
 			Timestamp:    time.Now().UTC().Format(time.RFC3339Nano),
 			Level:        "info",
@@ -208,6 +211,8 @@ func (s *Server) middlewareAccessLog(h http.Handler) http.Handler {
 			ResponseSize: sr.bytes,
 			UserAgent:    ua,
 			Username:     user,
+			TraceID:      traceID,
+			SpanID:       spanID,
 		}
 		s.accessLog.Log(entry)
 	})

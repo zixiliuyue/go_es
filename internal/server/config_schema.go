@@ -299,6 +299,36 @@ func DefaultConfigSchema() *ConfigSchema {
 				Path: "watch_interval", Kind: KindRange, Min: ptrF(0), Max: ptrF(float64(time.Hour)),
 				Message: "watch_interval 应在 0 ~ 1h 之间",
 			},
+
+			// ---------- tracing.enabled ----------
+			{
+				Path: "tracing.enabled", Kind: KindType, Type: TypeBool,
+				Message: "tracing.enabled 必须是布尔值(true/false)",
+			},
+			// ---------- tracing.service_name ----------
+			{
+				Path: "tracing.service_name", Kind: KindType, Type: TypeString,
+				Message: "tracing.service_name 必须是字符串(服务名)",
+			},
+			// ---------- tracing.service_version ----------
+			{
+				Path: "tracing.service_version", Kind: KindType, Type: TypeString,
+				Message: "tracing.service_version 必须是字符串(版本号)",
+			},
+			// ---------- tracing.propagation ----------
+			{
+				Path: "tracing.propagation", Kind: KindEnum, Values: []string{"tracecontext", "b3", "both"},
+				Message: "tracing.propagation 必须是 tracecontext/b3/both 之一",
+			},
+			// ---------- tracing.sampling_rate ----------
+			{
+				Path: "tracing.sampling_rate", Kind: KindType, Type: TypeFloat,
+				Message: "tracing.sampling_rate 必须是浮点数(0.0 ~ 1.0)",
+			},
+			{
+				Path: "tracing.sampling_rate", Kind: KindRange, Min: ptrF(0), Max: ptrF(1.0),
+				Message: "tracing.sampling_rate 应在 0.0 ~ 1.0 之间",
+			},
 		},
 	}
 }
@@ -398,7 +428,7 @@ func applyRule(r FieldRule, cfg *ConfigFile) *ValidationError {
 		if !ok {
 			return &ValidationError{Path: r.Path, Reason: r.Message + "(值不是字符串)", Value: val, Rule: "enum"}
 		}
-		if !contains(r.Values, s) {
+		if !sliceContains(r.Values, s) {
 			return &ValidationError{Path: r.Path, Reason: r.Message, Value: val, Rule: "enum"}
 		}
 	case KindPattern, KindFormat:
@@ -495,6 +525,16 @@ func lookupField(path string, cfg *ConfigFile) any {
 	case "tls.client_auth":
 		// ClientAuth 是 *string, 显式 none 是合法值
 		return cfg.TLS.ClientAuth
+	case "tracing.enabled":
+		return cfg.Tracing.Enabled
+	case "tracing.service_name":
+		return cfg.Tracing.ServiceName
+	case "tracing.service_version":
+		return cfg.Tracing.ServiceVer
+	case "tracing.propagation":
+		return cfg.Tracing.Propagation
+	case "tracing.sampling_rate":
+		return cfg.Tracing.SamplingRate
 	case "log_level":
 		return cfg.Log
 	case "watch_interval":
@@ -590,7 +630,8 @@ func toFloat(v any) (float64, bool) {
 	return 0, false
 }
 
-func contains(ss []string, s string) bool {
+// sliceContains 在字符串切片中查找给定元素(仅 schema 内部使用)
+func sliceContains(ss []string, s string) bool {
 	for _, x := range ss {
 		if x == s {
 			return true

@@ -29,14 +29,18 @@ import (
 
 // ConfigFile 配置文件结构
 type ConfigFile struct {
-	Addr  string         `yaml:"addr"`
-	Data  string         `yaml:"data"`
-	Auth  AuthConfig     `yaml:"auth"`
-	Limit LimitConfig    `yaml:"limit"`
-	TLS   TLSConfig      `yaml:"tls"`
-	Log   string         `yaml:"log_level"`
-	Watch time.Duration  `yaml:"watch_interval"`
-	Extra map[string]any `yaml:"extra,omitempty"`
+	Addr    string         `yaml:"addr"`
+	Data    string         `yaml:"data"`
+	Auth    AuthConfig     `yaml:"auth"`
+	Limit   LimitConfig    `yaml:"limit"`
+	TLS     TLSConfig      `yaml:"tls"`
+	Session SessionConfig  `yaml:"session"`
+	Tracing TracingConfig  `yaml:"tracing"`
+	RemoteWrite RemoteWriteConfig `yaml:"remote_write"`
+	OTelExport OTelExportConfig `yaml:"otel_export"`
+	Log     string         `yaml:"log_level"`
+	Watch   time.Duration  `yaml:"watch_interval"`
+	Extra   map[string]any `yaml:"extra,omitempty"`
 }
 
 // TLSConfig TLS 监听配置.
@@ -221,5 +225,53 @@ func (l *ConfigLoader) Stop() {
 		default:
 			close(l.stop)
 		}
+	}
+}
+
+// ForceReload 强制重新加载配置(忽略 mtime 检查)
+// 用于 /_config/reload 端点的手动触发场景.
+func (l *ConfigLoader) ForceReload() error {
+	if l.path == "" {
+		return nil
+	}
+	data, err := os.ReadFile(l.path)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+	var cfg ConfigFile
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return fmt.Errorf("parse config: %w", err)
+	}
+	if verrs := DefaultConfigSchema().Validate(&cfg); len(verrs) > 0 {
+		return fmt.Errorf("validate config: %w", verrs)
+	}
+	if err := SanityCheck(&cfg); err != nil {
+		return fmt.Errorf("validate config: %w", err)
+	}
+	if cfg.Watch == 0 {
+		cfg.Watch = DefaultWatchInterval
+	}
+	l.mu.Lock()
+	old := l.current
+	l.current = cfg
+	if st, _ := os.Stat(l.path); st != nil {
+		l.lastMTime = st.ModTime()
+	}
+	l.mu.Unlock()
+	if l.onChange != nil {
+		l.onChange(&old, &cfg)
+	}
+	return nil
+}
+
+// ToServerOptions 将 ConfigFile 转换为 ServerOptions
+func (c *ConfigFile) ToServerOptions() ServerOptions {
+	return ServerOptions{
+		Auth:        c.Auth,
+		Limit:       c.Limit,
+		Session:     c.Session,
+		Tracing:     c.Tracing,
+		RemoteWrite: c.RemoteWrite,
+		OTelExport:  c.OTelExport,
 	}
 }

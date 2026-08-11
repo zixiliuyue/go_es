@@ -52,6 +52,8 @@ type Server struct {
 	startupDone atomic.Bool
 	// RBAC 授权(新加, 索引级 + 操作级)
 	rbac *rbac
+	// Session 会话管理
+	sessionMgr *sessionManager
 	// WriteCoordinator 写入事务合并 + 回压
 	wc *WriteCoordinator
 	// SegmentManager 倒排分段
@@ -63,6 +65,14 @@ type Server struct {
 	healthCheckerMu sync.Mutex
 	// 快照目录
 	snapDir string
+	// ConfigLoader 配置文件加载器(可选, 由 cmd/server 注入)
+	configLoader *ConfigLoader
+	// TracerProvider 追踪提供者
+	tp *TracerProvider
+	// Prometheus remote_write 客户端
+	remoteWriter *RemoteWriter
+	// OpenTelemetry 导出器
+	otelExporter *OTelExporter
 }
 
 // ServerOptions 构造服务端的可选配置
@@ -71,6 +81,16 @@ type ServerOptions struct {
 	Auth AuthConfig
 	// Limit 限流与体限制配置
 	Limit LimitConfig
+	// ConfigLoader 配置文件加载器(可选, 用于 /_config/reload 端点)
+	ConfigLoader *ConfigLoader
+	// Session 会话管理配置
+	Session SessionConfig
+	// Tracing 分布式追踪配置
+	Tracing TracingConfig
+	// RemoteWrite Prometheus remote_write 配置
+	RemoteWrite RemoteWriteConfig
+	// OTelExport OpenTelemetry 导出配置
+	OTelExport OTelExportConfig
 }
 
 // New 创建一个新的服务端
@@ -94,6 +114,13 @@ func NewWithOptions(store *storage.Store, engine *search.Engine, logger *zap.Log
 	}
 	metrics := NewServerMetrics()
 	shutdown := &ShutdownState{}
+	// Tracing 初始化
+	tracingCfg := opts.Tracing
+	if tracingCfg.ServiceName == "" {
+		tracingCfg = DefaultTracingConfig()
+	}
+	tp := NewTracerProvider(tracingCfg)
+
 	s := &Server{
 		store:       store,
 		engine:      engine,
@@ -106,6 +133,34 @@ func NewWithOptions(store *storage.Store, engine *search.Engine, logger *zap.Log
 		rbac:        newRBAC(),
 		wc:          NewWriteCoordinator(WriteConfig{MaxConcurrent: 64, MaxBatchSize: 1000}),
 		startedAt:   time.Now(),
+		configLoader: opts.ConfigLoader,
+		tp:          tp,
+	}
+	// 将 tracerProvider 注入到 guards
+	s.guards.tracerProvider = tp
+	logger.Info("distributed tracing initialized",
+		zap.String("service_name", tracingCfg.ServiceName),
+		zap.String("propagation", tracingCfg.Propagation),
+		zap.Bool("enabled", tracingCfg.Enabled))
+	// Session 会话管理初始化
+	sessionCfg := opts.Session
+	if sessionCfg.Timeout <= 0 {
+		sessionCfg.Timeout = DefaultSessionConfig().Timeout
+	}
+	if sessionCfg.Secret == "" {
+		sessionCfg.Secret = DefaultSessionConfig().Secret
+	}
+	s.sessionMgr = newSessionManager(s, sessionCfg)
+	if sessionCfg.Enabled {
+		s.sessionMgr.loadFromStore()
+		s.sessionMgr.StartCleanupLoop()
+	}
+	// 将会话 Token 校验函数注入到 auth 中间件
+	if s.sessionMgr != nil {
+		s.guards.tokenValidator = func(token string) (string, bool) {
+			user, err := s.sessionMgr.validateToken(token)
+			return user, err == nil
+		}
 	}
 	// SegmentManager 初始化(在 wc 之后, 因为它依赖 engine)
 	s.seg = NewSegmentManager(SegmentConfig{
@@ -119,26 +174,65 @@ func NewWithOptions(store *storage.Store, engine *search.Engine, logger *zap.Log
 		BufferSize: 10000,
 		SampleRate: 1.0,
 	}, logger)
+	// AuditLogger 初始化 (默认关闭, 可通过 /_audit/config 启用)
+	InitAuditLogger(AuditConfig{
+		Enabled:    false,
+		BufferSize: 10000,
+	}, logger)
 	// 启动状态 + 健康检查
 	s.healthChecker = NewHealthChecker()
 	s.healthChecker.SetState(HealthReady)
 	// 简化: 启动即 ready
 	s.startupDone.Store(true)
+	// 初始化 exporters
+	s.initExporters(opts, logger)
 	s.router = s.buildRouter()
 	return s
 }
 
 // Shutdown 标记服务正在关闭并等待 inflight 任务排空(直到 ctx 结束或全部完成)
-func (s *Server) Shutdown(ctx context.Context) { s.shutdown.MarkShuttingDown(ctx) }
+func (s *Server) Shutdown(ctx context.Context) {
+	s.shutdown.MarkShuttingDown(ctx)
+	if s.sessionMgr != nil {
+		s.sessionMgr.Stop()
+	}
+	// 关闭 exporters, flush 剩余数据
+	if s.remoteWriter != nil {
+		s.remoteWriter.Close()
+	}
+	if s.otelExporter != nil {
+		s.otelExporter.Close()
+	}
+}
 
 // MarkStartupDone 启动完成后由 main 调用, 否则 /_health/startup 仍返回 503
 func (s *Server) MarkStartupDone() { s.startupDone.Store(true) }
 
+// TracerProvider 获取追踪提供者
+func (s *Server) TracerProvider() *TracerProvider { return s.tp }
+
 // Handler 返回 net/http.Handler
 func (s *Server) Handler() http.Handler {
 	router := http.HandlerFunc(s.router.ServeHTTP)
-	// 链路顺序: auth (in chainMiddleware) -> rbac -> accessLog -> bodyLimit -> rateLimit -> router
-	return s.guards.chainMiddleware(s.middlewareAccessLog(s.middlewareRBAC(router)))
+	// 链路顺序: session -> validation -> cors -> auditLog -> auth -> rbac -> accessLog -> bodyLimit -> rateLimit -> router
+	var handler http.Handler = router
+	// 审计日志最内层, 记录所有写操作
+	handler = s.middlewareAuditLog(handler)
+	// 慢查询日志检测
+	handler = s.withSlowLog(handler)
+	// 访问日志
+	handler = s.middlewareAccessLog(handler)
+	// RBAC 授权
+	handler = s.middlewareRBAC(handler)
+	// 会话 Token 校验(在 RBAC 之前, 这样可以覆盖 auth)
+	handler = s.middlewareSession(handler)
+	// 输入校验
+	handler = s.middlewareValidation(handler)
+	// CORS
+	handler = s.middlewareCORS(handler)
+	// 认证
+	handler = s.guards.chainMiddleware(handler)
+	return handler
 }
 
 // buildRouter 构造路由表
@@ -221,12 +315,42 @@ func (s *Server) buildRouter() *router {
 	// /_accesslog/stats
 	rt.addExact("GET", []string{"_accesslog", "stats"}, s.handleAccessLogStats)
 
+	// /_slowlog/* 慢查询日志端点
+	rt.addExact("GET", []string{"_slowlog", "stats"}, s.handleSlowLogStats)
+	rt.addExact("PUT", []string{"_slowlog", "config"}, s.handleSlowLogConfig)
+	rt.addExact("POST", []string{"_slowlog", "reset"}, s.handleSlowLogReset)
+
+	// /_audit/* 审计日志端点
+	rt.addExact("GET", []string{"_audit"}, s.handleAuditQuery)
+	rt.addExact("GET", []string{"_audit", "stats"}, s.handleAuditStats)
+	rt.addExact("PUT", []string{"_audit", "config"}, s.handleAuditConfig)
+
+	// /_validation/* 输入校验端点
+	rt.addExact("GET", []string{"_validation", "config"}, s.handleValidationConfig)
+	rt.addExact("PUT", []string{"_validation", "config"}, s.handleValidationConfigUpdate)
+
+	// /_debug/pprof/* 性能剖析端点
+	rt.addExact("GET", []string{"_debug", "pprof"}, s.handlePprofIndex)
+	rt.addExact("GET", []string{"_debug", "pprof", "cmdline"}, s.handlePprofCmdline)
+	rt.addExact("GET", []string{"_debug", "pprof", "profile"}, s.handlePprofProfile)
+	rt.addExact("GET", []string{"_debug", "pprof", "symbols"}, s.handlePprofSymbols)
+	rt.addExact("GET", []string{"_debug", "pprof", "goroutine"}, s.handlePprofGoroutine)
+	rt.addExact("GET", []string{"_debug", "pprof", "heap"}, s.handlePprofHeap)
+	rt.addExact("GET", []string{"_debug", "pprof", "threadcreate"}, s.handlePprofThreadcreate)
+	rt.addExact("GET", []string{"_debug", "pprof", "allocs"}, s.handlePprofAllocs)
+	rt.addExact("GET", []string{"_debug", "pprof", "block"}, s.handlePprofBlock)
+	rt.addExact("GET", []string{"_debug", "pprof", "mutex"}, s.handlePprofMutex)
+
+	// /_config/reload 配置热加载端点
+	rt.addExact("POST", []string{"_config", "reload"}, s.handleConfigReload)
+
 	// /metrics  Prometheus 抓取端点
 	rt.addExact("GET", []string{"metrics"}, s.handleMetrics)
 
 	// /_ui/  与  /_ui/index.html  内置 Web 控制台
 	rt.addExact("GET", []string{"_ui"}, s.handleUI)
 	rt.addExact("GET", []string{"_ui", "index.html"}, s.handleUI)
+	rt.addExact("GET", []string{"_ui", "admin.html"}, s.handleAdminUI)
 
 	// /_security/*  RBAC API
 	rt.addExact("GET", []string{"_security", "whoami"}, s.handleWhoAmI)
@@ -240,6 +364,28 @@ func (s *Server) buildRouter() *router {
 	rt.addExact("POST", []string{"_security", "role", "{name}"}, s.handleCreateRole)
 	rt.addExact("PUT", []string{"_security", "role", "{name}"}, s.handleCreateRole)
 	rt.addExact("DELETE", []string{"_security", "role", "{name}"}, s.handleDeleteRole)
+
+	// /_security/login 登录/登出/会话管理
+	rt.addExact("POST", []string{"_security", "login"}, s.handleLogin)
+	rt.addExact("POST", []string{"_security", "logout"}, s.handleLogout)
+	rt.addExact("POST", []string{"_security", "logout_all"}, s.handleLogoutAll)
+	rt.addExact("GET", []string{"_security", "session"}, s.handleGetCurrentSession)
+	rt.addExact("GET", []string{"_security", "session", "stats"}, s.handleSessionStats)
+	rt.addExact("GET", []string{"_security", "session", "config"}, s.handleSessionConfig)
+	rt.addExact("PUT", []string{"_security", "session", "config"}, s.handleSessionConfig)
+	rt.addExact("GET", []string{"_security", "sessions"}, s.handleListSessions)
+	rt.addExact("DELETE", []string{"_security", "sessions"}, s.handleRevokeAllSessions)
+	rt.addExact("GET", []string{"_security", "sessions", "all"}, s.handleListAllSessions)
+	rt.addExact("GET", []string{"_security", "session", "{token}"}, s.handleGetSession)
+	rt.addExact("DELETE", []string{"_security", "session", "{token}"}, s.handleRevokeSession)
+
+	// /_security/permission 独立权限管理(细化 RBAC)
+	rt.addExact("GET", []string{"_security", "permission"}, s.handleListPermissions)
+	rt.addExact("GET", []string{"_security", "permission", "{name}"}, s.handleGetPermission)
+	rt.addExact("POST", []string{"_security", "permission", "{name}"}, s.handleCreatePermission)
+	rt.addExact("PUT", []string{"_security", "permission", "{name}"}, s.handleCreatePermission)
+	rt.addExact("DELETE", []string{"_security", "permission", "{name}"}, s.handleDeletePermission)
+	rt.addExact("POST", []string{"_security", "permission", "batch"}, s.handleBatchPermissions)
 
 	// 兜底: {index}/...
 	rt.addIndexDispatcher(s.dispatchIndex)
@@ -353,3 +499,56 @@ func (s *Server) dispatchIndex(w http.ResponseWriter, r *http.Request, index str
 	}
 	http.NotFound(w, r)
 }
+
+// initExporters 根据配置初始化 remote_write 与 OTel 导出器
+func (s *Server) initExporters(opts ServerOptions, logger *zap.Logger) {
+	// 设置全局 TracerProvider (用于 Span.End() 回调)
+	SetGlobalTracerProvider(s.tp)
+
+	// Prometheus remote_write
+	if opts.RemoteWrite.Enabled {
+		rw, err := NewRemoteWriter(opts.RemoteWrite, logger)
+		if err != nil {
+			logger.Error("初始化 Prometheus remote_write 客户端失败", zap.Error(err))
+		} else {
+			s.remoteWriter = rw
+			logger.Info("Prometheus remote_write 客户端初始化完成",
+				zap.String("endpoint", opts.RemoteWrite.Endpoint))
+		}
+	}
+	// OpenTelemetry 导出器
+	if opts.OTelExport.Enabled {
+		exp, err := NewOTelExporter(opts.OTelExport, logger)
+		if err != nil {
+			logger.Error("初始化 OpenTelemetry 导出器失败", zap.Error(err))
+		} else {
+			s.otelExporter = exp
+			logger.Info("OpenTelemetry 导出器初始化完成",
+				zap.Bool("metrics", opts.OTelExport.Metrics.Enabled),
+				zap.Bool("traces", opts.OTelExport.Traces.Enabled),
+				zap.Bool("logs", opts.OTelExport.Logs.Enabled))
+
+			// 将 OTelTracesExporter 注册到 TracerProvider, 实现 span 自动导出
+			if exp.TracesExporter() != nil {
+				s.tp.SetSpanExporter(exp.TracesExporter())
+				logger.Info("OTel traces exporter 已注册到 TracerProvider")
+			}
+		}
+	}
+}
+
+// StartExporters 启动所有 exporter 的后台协程(在 HTTP server 启动后调用)
+func (s *Server) StartExporters(ctx context.Context) {
+	if s.remoteWriter != nil {
+		s.remoteWriter.Start(ctx)
+	}
+	if s.otelExporter != nil {
+		s.otelExporter.Start(ctx)
+	}
+}
+
+// RemoteWriter 返回 remote_write 客户端
+func (s *Server) RemoteWriter() *RemoteWriter { return s.remoteWriter }
+
+// OTelExporter 返回 OTel 导出器
+func (s *Server) OTelExporter() *OTelExporter { return s.otelExporter }

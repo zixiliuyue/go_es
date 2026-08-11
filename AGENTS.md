@@ -323,6 +323,31 @@ watch_interval: 5s          # 轮询间隔(go duration)
   - `internal/storage/store.go`:新增 `Dir()` 方法暴露数据目录 + `ScanAllKeys` 迭代全量 key;新增 `PutRaw` 写原始字节
   - 单元测试:`internal/server/snapshot_test.go` 10 个用例:路径推导/创建恢复/元数据缺失恢复/无仓库/文件格式/删除元数据+文件/恢复后可搜索/恢复文档计数
   - e2e:`scripts/e2e-tests.sh` section 35(35a~35m):建库→写数据→创建快照→验证元信息→删除原数据→恢复→验证 5 docs 全恢复→搜索命中→文档内容完整→删除快照→已删除快照 404→已删除快照恢复 404→删仓库
+- 2026-08-10: 完成 #23 分布式追踪 — **OpenTelemetry Trace Context 透传**:
+  - `internal/server/tracing.go` 核心追踪模块(W3C TraceContext + B3 双协议):
+    - W3C:`parseW3CTraceContext`/`injectW3CTraceContext` 处理 `traceparent` + `tracestate` 头(格式 `00-{traceId}-{spanId}-{flags}`)
+    - B3:`parseB3Context`/`injectB3Context` 支持多头(X-B3-TraceId/SpanId/Sampled/ParentSpanId)和单头(b3)两种格式
+    - 传播模式:`tracecontext`/`b3`/`both` 三种,可通过 `TracingConfig.Propagation` 选择
+    - TracerProvider:全局单例管理器,支持按 name 获取/更新 tracer,支持热更新配置
+    - Tracer:Span 创建/采样控制/远程 TraceContext 继承
+    - Span:完整生命周期 (Start→SetAttribute→SetStatus→AddEvent→End),线程安全 (sync.Mutex)
+    - 辅助:`PropagateTraceContext`/`InjectTraceContext`/`ExtractTraceContext` 用于 HTTP 客户端透传
+  - `internal/server/guards.go` 中间件:
+    - `middlewareTrace`:最外层包裹,入站从 header 提取 trace context→创建子 Span→注入 context;出站在响应头注入 traceparent/b3
+    - `traceResponseWriter`:包装 ResponseWriter 捕获 status code,用于 Span 状态判定
+  - `internal/server/server.go` 集成:
+    - `Server` 新增 `tp *TracerProvider` 字段,`ServerOptions` 新增 `Tracing TracingConfig`
+    - `NewWithOptions` 自动初始化并注入 guards,日志输出初始化配置
+    - `Server.TracerProvider()` 公共访问器
+  - 日志集成:
+    - `accesslog.go::AccessLogEntry` 新增 `TraceID`/`SpanID`
+    - `auditlog.go::AuditEntry` 新增 `TraceID`/`SpanID`
+    - `slowlog.go` 慢请求日志新增 `trace_id`/`span_id`
+    - `TraceInfoFromContext(ctx)` 统一提取接口
+  - 配置:
+    - YAML 支持 `tracing:` 块:`enabled`/`service_name`/`service_version`/`propagation`/`sampling_rate`
+    - `config_schema.go` 新增 6 条 tracing 字段校验规则(类型/范围/枚举)
+  - 单元测试:`internal/server/tracing_test.go` 35+ 用例全通过
 
 ### 已实现完整覆盖
 - 倒排索引查询引擎(range 已倒排化, term/match 原本就是倒排)
@@ -337,6 +362,7 @@ watch_interval: 5s          # 轮询间隔(go duration)
 - reindex 进度精细化(batch=100) + 取消回滚
 - YAML 配置 schema 校验(启动期, 数据驱动, 错误聚合)
 - **真实快照与恢复**(#16, NDJSON 文件级, 跨 store 恢复, 完整性校验, 物理文件删除)
+- **分布式追踪**(#23, W3C TraceContext + B3 双协议透传, Span 生命周期, 日志 trace_id/span_id 关联)
 
 ### 待办(更长期)
 (所有本期工作已完成; 后续按需增量)

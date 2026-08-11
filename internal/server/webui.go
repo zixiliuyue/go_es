@@ -19,7 +19,7 @@ import (
 	"net/http"
 )
 
-//go:embed web/index.html
+//go:embed web/*
 var webFS embed.FS
 
 // handleUI GET /_ui/  或  /_ui/index.html
@@ -30,7 +30,18 @@ func (s *Server) handleUI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	// UI 不缓存, 方便开发
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = io.Copy(w, byteReaderPool(data))
+}
+
+// handleAdminUI GET /_ui/admin.html 管理员控制台
+func (s *Server) handleAdminUI(w http.ResponseWriter, r *http.Request) {
+	data, err := webFS.ReadFile("web/admin.html")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", err.Error(), "")
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	_, _ = io.Copy(w, byteReaderPool(data))
 }
