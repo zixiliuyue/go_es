@@ -18,7 +18,8 @@ import (
 )
 
 // newTestServer 启动一个基于内存存储的自研服务端(无需外部 ES)
-func newTestServer(t *testing.T) *httptest.Server {
+// 接受 testing.TB 接口, 兼容 *testing.T 和 *testing.F(fuzz 测试用)
+func newTestServer(t testing.TB) *httptest.Server {
 	t.Helper()
 	store, err := storage.Open("")
 	assert.NoError(t, err)

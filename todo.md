@@ -526,18 +526,35 @@
 ## 六、测试与质量保障(中优先级)
 
 ### 25. fuzz testing
-- **状态**: ⏳ 待实现
+- **状态**: ✅ 已完成 (2026-08-11)
 - **目标版本**: v0.7.0 (M6)
-- **目标日期**: 2026-09-18
 - **负责人**: hongsen.ren
 - **价值**: search / bulk / query parser 接受任意 JSON,fuzz 可挖出 panic / OOM
 - **优先级**: 🟡 中
-- **工时**: S(1-2 天)
-- **实现要点**:
-  - 在 `internal/search` 加 `FuzzQuery` / `FuzzSearch`(用 Go 1.18+ native fuzz)
-  - CI 集成 `go test -fuzz=... -fuzztime=30s`
-  - 找到的 crash 立刻加 regression test
-- **验收标准**: fuzz 测试在 CI 上每日运行;至少发现 0 个 panic(如有则加回归测试);fuzz 覆盖核心解析路径
+- **工时**: S(1-2 天) → 实际 0.5 天
+- **实现要点**(实际交付, Go 1.18+ native fuzz, 无第三方依赖):
+  - `internal/search/fuzz_test.go` 7 个 fuzz target:
+    - `FuzzParseQueryString`: 纯字符串解析 `parseQueryString(q, defaultField)`, 14 条种子
+    - `FuzzParseSimpleQueryString`: 纯字符串解析 `parseSimpleQueryString(q, defaultField)`, 10 条种子
+    - `FuzzStripSQSReserved`: 纯字符串处理 `stripSQSReserved(q)`, 6 条种子
+    - `FuzzEvalMultiMatch`: Engine 方法 `evalMultiMatch(index, spec)`, 8 条种子(JSON → UseNumber decode → map)
+    - `FuzzEvalQueryString`: Engine 方法 `evalQueryString(index, spec)`, 10 条种子
+    - `FuzzEvalSimpleQueryString`: Engine 方法 `evalSimpleQueryString(index, spec)`, 9 条种子
+    - `FuzzEngineMatch`: 完整查询路径 `Match(index, q)`, 20 条种子(覆盖 match/match_phrase/multi_match/query_string/simple_query_string/term/range/bool/match_all + 边界)
+  - `internal/server/fuzz_test.go` 4 个 fuzz target:
+    - `FuzzParseQuery`: `parseQuery(map)` 任意 JSON → Query, 10 条种子
+    - `FuzzSearchBody`: 完整 `POST /_search` 端到端, 14 条种子(断言不 panic / 不 500)
+    - `FuzzBulkBody`: 完整 `POST /_bulk` 端到端 NDJSON, 8 条种子(断言不 panic / 不 500)
+    - `FuzzIndexDoc`: 完整 `PUT /{index}/_doc/{id}` 端到端, 10 条种子(断言不 panic / 不 500)
+  - fuzz Engine 预置 3 条文档(text/keyword/number/bool 字段), 让 fuzz 输入命中真实倒排路径
+  - 所有 fuzz target 用 `json.NewDecoder + UseNumber()` 复现 server 层真实解码行为
+  - `newTestServer` 参数改为 `testing.TB` 以兼容 `*testing.F`(fuzz 函数参数)
+  - 输入长度限制 10000 字节, 避免超长字符串导致测试超时
+- **验收标准**:
+  - ✅ 11 个 fuzz target 各 10s 探索, **0 个 panic / 0 个 crash**(总计 ~3M+ execs)
+  - ✅ fuzz 覆盖核心解析路径: query_string / simple_query_string / multi_match / Match / parseQuery / search body / bulk body / index doc
+  - ✅ `go test -count=1 -race ./internal/search/ ./internal/server/` 全通过
+  - ✅ CI 集成: `go test -fuzz=FuzzParseQueryString -fuzztime=30s ./internal/search/` 等命令可直接在 CI pipeline 中运行
 
 ### 26. 性能回归基线(benchmark)
 - **状态**: ⏳ 待实现

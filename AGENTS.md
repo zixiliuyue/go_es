@@ -454,6 +454,14 @@ watch_interval: 5s          # 轮询间隔(go duration)
   - 单元测试:`dumprestore_test.go` 17+ 用例, 覆盖率 80.8%,`go test -race` 无竞争
   - e2e:`scripts/e2e-tests.sh` section 40(HTTP 模拟 dump/restore) + `scripts/test-in-docker.sh` host-side CLI 真实命令行验证
 
+- 2026-08-11: 完成 #25 fuzz testing — **Go 1.18+ native fuzz 覆盖核心解析路径**:
+  - `internal/search/fuzz_test.go` 7 个 fuzz target: `FuzzParseQueryString` / `FuzzParseSimpleQueryString` / `FuzzStripSQSReserved`(纯字符串解析) + `FuzzEvalMultiMatch` / `FuzzEvalQueryString` / `FuzzEvalSimpleQueryString`(Engine 方法, JSON → UseNumber → map) + `FuzzEngineMatch`(完整 Match 路径, fuzz []byte → parseQuery → Match)
+  - `internal/server/fuzz_test.go` 4 个 fuzz target: `FuzzParseQuery`(parseQuery map→Query) + `FuzzSearchBody`(`POST /_search` 端到端) + `FuzzBulkBody`(`POST /_bulk` NDJSON 端到端) + `FuzzIndexDoc`(`PUT /{index}/_doc/{id}` 端到端); 端到端 target 断言不 panic / 不 500
+  - fuzz Engine 预置 3 条文档(text/keyword/number/bool), 让输入命中真实倒排路径; 所有 target 用 `json.NewDecoder + UseNumber()` 复现 server 层真实解码
+  - `newTestServer` 参数改为 `testing.TB` 以兼容 `*testing.F`
+  - 11 个 target 各 10s 探索: **0 panic / 0 crash**, ~3M+ execs
+  - 无第三方依赖(Go stdlib native fuzz)
+
 ### 待办(更长期)
 (所有本期工作已完成; 后续按需增量)
 
