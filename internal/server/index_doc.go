@@ -139,6 +139,81 @@ func (s *Server) handleIndexMappingForName(w http.ResponseWriter, r *http.Reques
 	})
 }
 
+// handleIndexSettingsForName GET /{index}/_settings
+// 支持单索引、多索引(idx1,idx2)与通配(idx*)模式
+//
+// 行为与 ES 对齐:
+//   - 精确名(无 *, 无 ,)且索引不存在 → 404
+//   - 通配/多索引无匹配 → 200 + 空对象
+func (s *Server) handleIndexSettingsForName(w http.ResponseWriter, r *http.Request, index string) {
+	indices := s.getIndicesByPattern(index)
+
+	// 判断是否为单个精确名(无通配、无逗号)
+	isExact := !strings.ContainsAny(index, "*,")
+
+	if len(indices) == 0 {
+		if isExact {
+			writeError(w, http.StatusNotFound, "index_not_found_exception",
+				"no such index", index)
+			return
+		}
+		// 通配无匹配 → 返回空对象
+		writeJSON(w, http.StatusOK, map[string]interface{}{})
+		return
+	}
+
+	result := make(map[string]interface{}, len(indices))
+	notFoundCount := 0
+	for _, name := range indices {
+		var meta IndexMeta
+		found, err := s.store.Get(storage.MetaKey(name), &meta)
+		if err != nil || !found {
+			notFoundCount++
+			continue
+		}
+		settings := meta.Settings
+		if settings == nil {
+			settings = map[string]interface{}{}
+		}
+		result[name] = map[string]interface{}{
+			"settings": settings,
+		}
+	}
+
+	// 精确名但索引不存在: 404
+	if isExact && notFoundCount > 0 {
+		writeError(w, http.StatusNotFound, "index_not_found_exception",
+			"no such index", index)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, result)
+}
+
+// handleAllSettings GET /_settings (无索引参数时返回全部索引的 settings)
+func (s *Server) handleAllSettings(w http.ResponseWriter, r *http.Request) {
+	indices := s.allIndexNames()
+	result := make(map[string]interface{}, len(indices))
+	for _, name := range indices {
+		var meta IndexMeta
+		found, err := s.store.Get(storage.MetaKey(name), &meta)
+		if err != nil {
+			continue
+		}
+		if !found {
+			continue
+		}
+		settings := meta.Settings
+		if settings == nil {
+			settings = map[string]interface{}{}
+		}
+		result[name] = map[string]interface{}{
+			"settings": settings,
+		}
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 // 文档接口
 
 // handleDocIndexForName PUT/POST /{index}/_doc/{id}
@@ -165,6 +240,11 @@ func (s *Server) handleDocIndexForName(w http.ResponseWriter, r *http.Request, i
 			return
 		}
 		doc = processed
+	}
+	// mapping 校验: 按索引 mapping 检查文档字段类型与动态字段
+	if merr := s.validateDocMapping(index, doc); merr != nil {
+		writeError(w, http.StatusBadRequest, "mapper_parsing_exception", merr.Error(), "")
+		return
 	}
 	q := r.URL.Query()
 	meta, status, errResp := s.applyWrite(writeOp{
@@ -212,6 +292,11 @@ func (s *Server) handleDocIndexAutoIDForName(w http.ResponseWriter, r *http.Requ
 	var doc map[string]interface{}
 	if err := decodeJSON(r, &doc); err != nil {
 		writeError(w, http.StatusBadRequest, "parse_exception", err.Error(), "")
+		return
+	}
+	// mapping 校验: 按索引 mapping 检查文档字段类型与动态字段
+	if merr := s.validateDocMapping(index, doc); merr != nil {
+		writeError(w, http.StatusBadRequest, "mapper_parsing_exception", merr.Error(), "")
 		return
 	}
 	id := generateID()
@@ -299,6 +384,11 @@ func (s *Server) handleUpdateForName(w http.ResponseWriter, r *http.Request, ind
 	}
 	for k, v := range req.Doc {
 		existing[k] = v
+	}
+	// mapping 校验: 按索引 mapping 检查合并后的文档字段类型与动态字段
+	if merr := s.validateDocMapping(index, existing); merr != nil {
+		writeError(w, http.StatusBadRequest, "mapper_parsing_exception", merr.Error(), "")
+		return
 	}
 	if err := s.store.Put(storage.DocKey(index, id), existing); err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error(), "")

@@ -177,18 +177,34 @@ func (s *Server) handleILMDeletePolicy(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleILMExplainForName GET /{index}/_ilm/explain
+// 返回索引的真实 ILM 状态, 包括当前 phase、rollover 次数、错误信息等
 func (s *Server) handleILMExplainForName(w http.ResponseWriter, r *http.Request, index string) {
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"indices": map[string]interface{}{
-			index: map[string]interface{}{
-				"managed": true,
-				"policy":  "demo_articles_policy",
-				"phase":   "hot",
-				"action":  "complete",
-				"step":    "complete",
+	if s.ilmExecutor == nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"indices": map[string]interface{}{
+				index: map[string]interface{}{
+					"managed": false,
+				},
 			},
-		},
-	})
+		})
+		return
+	}
+
+	state, err := s.ilmExecutor.GetILMState(index)
+	if err != nil {
+		// 未受管索引: 返回 managed=false
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"indices": map[string]interface{}{
+				index: map[string]interface{}{
+					"managed": false,
+				},
+			},
+		})
+		return
+	}
+
+	resp := BuildILMExplainResponse(index, state)
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // Ingest Pipeline

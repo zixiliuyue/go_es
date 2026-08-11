@@ -284,6 +284,47 @@ func (e *Engine) SnapshotIndex(index string) map[string]map[string]map[string]st
 	return out
 }
 
+// CreateIndex 在引擎内存中为指定索引预留存储空间
+//
+// 说明:
+//   - 本引擎为懒加载模式, 首次 IndexDoc 会自动创建内部 map;
+//     显式调用只是为了在 rollover 等场景下提前初始化, 避免 nil map 读写
+//   - 调用必须在持有 mu 锁外进行, 本函数自行加锁
+//
+// 参数:
+//   - index: 要初始化的索引名(若已存在则为 no-op)
+func (e *Engine) CreateIndex(index string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.docs[index] == nil {
+		e.docs[index] = make(map[string]map[string]interface{})
+	}
+	if e.inverted[index] == nil {
+		e.inverted[index] = make(map[string]map[string]map[string]struct{})
+	}
+}
+
+// DeleteIndex 从引擎内存中彻底删除指定索引的所有文档与倒排
+//
+// 说明:
+//   - 仅清理内存态(docs/inverted/sortedCache/scorer),
+//     持久层数据由上层(server/storage)负责删除
+//   - 若索引不存在, 本函数为 no-op
+//
+// 参数:
+//   - index: 要删除的索引名
+func (e *Engine) DeleteIndex(index string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	// 通知 sortedCache 清理
+	e.sortedCache.removeIndex(index)
+	// 通知 scorer 清理 BM25 统计
+	e.scorer.onDeleteIndex(index)
+	// 移除 docs 与倒排
+	delete(e.docs, index)
+	delete(e.inverted, index)
+}
+
 // ensureFieldStats 取得字段统计; 若缺失,触发一次重建后返回
 func (e *Engine) ensureFieldStats(index, field string) *FieldStats {
 	e.scorer.mu.RLock()

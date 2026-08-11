@@ -58,6 +58,8 @@ type Server struct {
 	wc *WriteCoordinator
 	// SegmentManager 倒排分段
 	seg *SegmentManager
+	// ILM 执行器
+	ilmExecutor *ILMExecutor
 	// AccessLogger 访问日志
 	accessLog *AccessLogger
 	// HealthChecker 健康检查
@@ -168,6 +170,9 @@ func NewWithOptions(store *storage.Store, engine *search.Engine, logger *zap.Log
 		MaxBufferBytes:       64 << 20,
 		AutoFlushIntervalSec: 30,
 	}, store, engine)
+	// ILM 执行器初始化(默认 30s 扫描间隔)
+	s.ilmExecutor = NewILMExecutor(s, logger, 30*time.Second)
+	s.ilmExecutor.Start()
 	// AccessLogger 初始化 (默认开启, 写 stdout)
 	s.accessLog = NewAccessLogger(AccessLogConfig{
 		Enabled:    true,
@@ -193,6 +198,9 @@ func NewWithOptions(store *storage.Store, engine *search.Engine, logger *zap.Log
 // Shutdown 标记服务正在关闭并等待 inflight 任务排空(直到 ctx 结束或全部完成)
 func (s *Server) Shutdown(ctx context.Context) {
 	s.shutdown.MarkShuttingDown(ctx)
+	if s.ilmExecutor != nil {
+		s.ilmExecutor.Stop()
+	}
 	if s.sessionMgr != nil {
 		s.sessionMgr.Stop()
 	}
@@ -246,6 +254,9 @@ func (s *Server) buildRouter() *router {
 
 	// /_cluster/health
 	rt.addExact("GET", []string{"_cluster", "health"}, s.handleClusterHealth)
+
+	// /_settings (返回全部索引的 settings)
+	rt.addExact("GET", []string{"_settings"}, s.handleAllSettings)
 
 	// /_aliases (POST)
 	rt.addExact("POST", []string{"_aliases"}, s.handleAliasesUpdate)
@@ -465,6 +476,11 @@ func (s *Server) dispatchIndex(w http.ResponseWriter, r *http.Request, index str
 	// /{index}/_mapping
 	if len(rest) >= 1 && rest[0] == "_mapping" && method == http.MethodGet {
 		s.handleIndexMappingForName(w, r, index)
+		return
+	}
+	// /{index}/_settings
+	if len(rest) >= 1 && rest[0] == "_settings" && method == http.MethodGet {
+		s.handleIndexSettingsForName(w, r, index)
 		return
 	}
 	// /{index}/_ilm/explain

@@ -120,6 +120,33 @@
     .idx { display: block; padding: 6px 16px; cursor: pointer; color: var(--text-muted); text-decoration: none; }
     .idx:hover { background: var(--bg-hover); }
     .idx.active { background: var(--bg-active); color: white; }
+    /* 索引管理面板 */
+    .idxhead { display: flex; align-items: center; padding: 4px 16px 8px; gap: 6px; }
+    .idxhead .newidx { flex: 1; background: var(--bg-input); color: var(--text); border: 1px solid var(--border); padding: 4px 8px; border-radius: 4px; font-size: 12px; min-width: 0; }
+    .idxhead .createbtn { background: var(--accent); color: white; border: 0; padding: 4px 10px; border-radius: 4px; font-size: 12px; cursor: pointer; }
+    .idxhead .createbtn:hover { background: var(--accent-hover); }
+    .idxrow { display: flex; align-items: center; padding: 4px 8px 4px 16px; gap: 4px; font-size: 12px; }
+    .idxrow .idxname { flex: 1; cursor: pointer; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .idxrow .idxname:hover { color: var(--text); }
+    .idxrow .idxname.active { color: white; font-weight: 500; }
+    .idxrow .meta { font-size: 10px; color: var(--text-faint); }
+    .idxrow .act { background: transparent; border: 1px solid var(--border); color: var(--text-dim); padding: 2px 6px; border-radius: 3px; cursor: pointer; font-size: 11px; }
+    .idxrow .act:hover { background: var(--bg-hover); color: var(--text); }
+    .idxrow .act.danger:hover { background: rgba(248, 81, 73, 0.15); color: var(--err); border-color: var(--err); }
+    .modal-mask { position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 1000; display: none; align-items: center; justify-content: center; }
+    .modal-mask.open { display: flex; }
+    .modal { background: var(--bg-elevated); border: 1px solid var(--border); border-radius: 8px; width: 560px; max-width: 90vw; max-height: 80vh; display: flex; flex-direction: column; overflow: hidden; }
+    .modal header { padding: 12px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+    .modal header h3 { font-size: 14px; font-weight: 600; }
+    .modal .modal-body { padding: 16px; overflow-y: auto; font-size: 13px; }
+    .modal .modal-body textarea { width: 100%; min-height: 180px; background: var(--bg-input); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 8px; font-family: monospace; font-size: 12px; }
+    .modal footer { padding: 12px 16px; border-top: 1px solid var(--border); display: flex; gap: 8px; justify-content: flex-end; }
+    .modal footer button { padding: 6px 14px; border-radius: 4px; border: 0; cursor: pointer; font-size: 13px; }
+    .modal footer .primary { background: var(--accent); color: white; }
+    .modal footer .primary:hover { background: var(--accent-hover); }
+    .modal footer .cancel { background: var(--bg-hover); color: var(--text); }
+    .modal footer .cancel:hover { background: var(--border); }
+    .modal .errmsg { color: var(--err); font-size: 12px; margin-top: 8px; }
     .content { padding: 20px; overflow-y: auto; animation: fadein 0.15s ease; }
     @keyframes fadein { from { opacity: 0; transform: translateY(2px); } to { opacity: 1; transform: none; } }
     .panel { background: var(--bg-elevated); border: 1px solid var(--border); border-radius: 6px; margin-bottom: 16px; }
@@ -250,6 +277,10 @@
 <main>
   <aside>
     <h2>索引</h2>
+    <div class="idxhead">
+      <input type="text" id="newIdxName" class="newidx" placeholder="新建索引名(支持粘贴 mapping JSON)">
+      <button class="createbtn" id="createIdxBtn" onclick="openCreateIndexModal()">+ 新建</button>
+    </div>
     <div id="indices"><div class="empty">加载中...</div></div>
     <h2 style="margin-top:8px">_tasks</h2>
     <div id="tasks" style="padding: 0 16px 8px; font-size: 12px;"></div>
@@ -864,11 +895,37 @@
     if (!indexCache.length) { list.innerHTML = '<div class="empty">无索引</div>'; return; }
     list.innerHTML = '';
     indexCache.forEach(idx => {
-      const a = document.createElement('a');
-      a.className = 'idx' + (activeTab()?.index === idx.index ? ' active' : '');
-      a.textContent = idx.index + ' (' + (idx['docs.count'] || 0) + ')';
-      a.onclick = (e) => { e.preventDefault(); selectIndex(idx.index); };
-      list.appendChild(a);
+      const row = document.createElement('div');
+      row.className = 'idxrow';
+      const nameEl = document.createElement('span');
+      nameEl.className = 'idxname' + (activeTab()?.index === idx.index ? ' active' : '');
+      nameEl.textContent = idx.index;
+      nameEl.title = idx.index;
+      nameEl.onclick = (e) => { e.preventDefault(); selectIndex(idx.index); };
+      const meta = document.createElement('span');
+      meta.className = 'meta';
+      meta.textContent = '(' + (idx['docs.count'] || 0) + ')';
+      const viewBtn = document.createElement('button');
+      viewBtn.className = 'act';
+      viewBtn.textContent = '映射';
+      viewBtn.title = '查看 mapping';
+      viewBtn.onclick = (e) => { e.stopPropagation(); openMappingModal(idx.index); };
+      const setBtn = document.createElement('button');
+      setBtn.className = 'act';
+      setBtn.textContent = '设置';
+      setBtn.title = '查看 settings';
+      setBtn.onclick = (e) => { e.stopPropagation(); openSettingsModal(idx.index); };
+      const delBtn = document.createElement('button');
+      delBtn.className = 'act danger';
+      delBtn.textContent = '删除';
+      delBtn.title = '删除索引';
+      delBtn.onclick = (e) => { e.stopPropagation(); confirmDeleteIndex(idx.index); };
+      row.appendChild(nameEl);
+      row.appendChild(meta);
+      row.appendChild(viewBtn);
+      row.appendChild(setBtn);
+      row.appendChild(delBtn);
+      list.appendChild(row);
     });
   }
   // 旧 e2e 钩子: 接受 index 名
@@ -878,8 +935,176 @@
     t.index = name;
     t.page = 0;
     saveTabs();
-    document.querySelectorAll('.idx').forEach(el => el.classList.toggle('active', el.textContent.startsWith(name)));
+    document.querySelectorAll('.idxname').forEach(el => el.classList.toggle('active', el.textContent === name));
     renderContent();
+  }
+
+  // ---------- 索引管理: 创建/删除/查看 mapping ----------
+  // openCreateIndexModal: 打开"新建索引"对话框(带可选 mapping JSON)
+  function openCreateIndexModal() {
+    const nameInput = $('newIdxName');
+    const name = (nameInput && nameInput.value || '').trim();
+    showCreateIndexModal(name);
+  }
+  function showCreateIndexModal(prefillName) {
+    let mask = $('createIndexModal');
+    if (!mask) {
+      mask = document.createElement('div');
+      mask.id = 'createIndexModal';
+      mask.className = 'modal-mask';
+      mask.innerHTML = `
+        <div class="modal" role="dialog" aria-label="创建索引">
+          <header><h3>创建索引</h3><button class="iconbtn" onclick="closeModal('createIndexModal')">×</button></header>
+          <div class="modal-body">
+            <div style="margin-bottom:12px">
+              <label>索引名(必填)</label>
+              <input type="text" id="createIdxName" style="width:100%;background:var(--bg-input);color:var(--text);border:1px solid var(--border);padding:6px 8px;border-radius:4px;font-size:13px" placeholder="my-index">
+            </div>
+            <div>
+              <label>Mapping(可选, JSON 格式,留空则动态 mapping)</label>
+              <textarea id="createIdxMapping" placeholder='{"properties":{"title":{"type":"text"},"count":{"type":"integer"}}}'></textarea>
+            </div>
+            <div class="errmsg" id="createIdxErr"></div>
+          </div>
+          <footer>
+            <button class="cancel" onclick="closeModal('createIndexModal')">取消</button>
+            <button class="primary" onclick="doCreateIndex()">创建</button>
+          </footer>
+        </div>`;
+      document.body.appendChild(mask);
+    }
+    if (prefillName) {
+      $('createIdxName').value = prefillName;
+    } else {
+      $('createIdxName').value = '';
+    }
+    $('createIdxMapping').value = '';
+    $('createIdxErr').textContent = '';
+    mask.classList.add('open');
+  }
+  // doCreateIndex: 真实调用 PUT /{index} 创建索引
+  async function doCreateIndex() {
+    const name = ($('createIdxName')?.value || '').trim();
+    const mappingText = ($('createIdxMapping')?.value || '').trim();
+    const errEl = $('createIdxErr');
+    if (!name) { errEl.textContent = '索引名必填'; return; }
+    let body = {};
+    if (mappingText) {
+      try {
+        const parsed = JSON.parse(mappingText);
+        body = { mappings: parsed };
+      } catch (e) {
+        // 允许用户直接粘贴完整映射对象 {properties: {...}} 或 {mappings: {...}}
+        // 尝试作为映射体
+        try {
+          const alt = JSON.parse(mappingText);
+          if (alt && typeof alt === 'object') {
+            body = alt.mappings ? alt : { mappings: alt };
+          }
+        } catch (e2) {
+          errEl.textContent = 'mapping 不是合法 JSON: ' + e.message;
+          return;
+        }
+      }
+    }
+    const r = await jput('/' + encodeURIComponent(name), body);
+    if (!r.ok) {
+      errEl.textContent = '创建失败 ' + r.code + ': ' + r.raw;
+      return;
+    }
+    closeModal('createIndexModal');
+    $('newIdxName').value = '';
+    await loadIndices();
+    toast('索引 ' + name + ' 创建成功');
+  }
+  // confirmDeleteIndex: 二次确认后调用 DELETE /{index}
+  function confirmDeleteIndex(name) {
+    if (!name) return;
+    if (!confirm('确认删除索引 ' + name + '? 该操作不可恢复。')) return;
+    doDeleteIndex(name);
+  }
+  async function doDeleteIndex(name) {
+    const r = await jdel('/' + encodeURIComponent(name));
+    if (!r.ok) {
+      alert('删除失败 ' + r.code + ': ' + r.raw);
+      return;
+    }
+    // 如果当前 Tab 指向该索引, 清空
+    const t = activeTab();
+    if (t && t.index === name) {
+      t.index = '';
+      saveTabs();
+      renderContent();
+    }
+    await loadIndices();
+    toast('索引 ' + name + ' 已删除');
+  }
+  // openMappingModal: GET /{index}/_mapping 并渲染
+  async function openMappingModal(name) {
+    let mask = $('mappingModal');
+    if (!mask) {
+      mask = document.createElement('div');
+      mask.id = 'mappingModal';
+      mask.className = 'modal-mask';
+      mask.innerHTML = `
+        <div class="modal" role="dialog" aria-label="查看 mapping">
+          <header><h3 id="mappingModalTitle">mapping</h3><button class="iconbtn" onclick="closeModal('mappingModal')">×</button></header>
+          <div class="modal-body">
+            <pre id="mappingModalBody" style="white-space:pre-wrap;word-break:break-all;font-size:12px;max-height:360px;overflow:auto"></pre>
+          </div>
+          <footer><button class="cancel" onclick="closeModal('mappingModal')">关闭</button></footer>
+        </div>`;
+      document.body.appendChild(mask);
+    }
+    $('mappingModalTitle').textContent = 'mapping · ' + name;
+    const bodyEl = $('mappingModalBody');
+    bodyEl.textContent = '加载中...';
+    mask.classList.add('open');
+    const r = await jget('/' + encodeURIComponent(name) + '/_mapping');
+    bodyEl.textContent = r.ok ? JSON.stringify(r.json, null, 2) : ('加载失败 ' + r.code + ': ' + r.raw);
+  }
+  // openSettingsModal: GET /{index}/_settings 并渲染
+  async function openSettingsModal(name) {
+    let mask = $('settingsModal');
+    if (!mask) {
+      mask = document.createElement('div');
+      mask.id = 'settingsModal';
+      mask.className = 'modal-mask';
+      mask.innerHTML = `
+        <div class="modal" role="dialog" aria-label="查看 settings">
+          <header><h3 id="settingsModalTitle">settings</h3><button class="iconbtn" onclick="closeModal('settingsModal')">×</button></header>
+          <div class="modal-body">
+            <pre id="settingsModalBody" style="white-space:pre-wrap;word-break:break-all;font-size:12px;max-height:360px;overflow:auto"></pre>
+          </div>
+          <footer><button class="cancel" onclick="closeModal('settingsModal')">关闭</button></footer>
+        </div>`;
+      document.body.appendChild(mask);
+    }
+    $('settingsModalTitle').textContent = 'settings · ' + name;
+    const bodyEl = $('settingsModalBody');
+    bodyEl.textContent = '加载中...';
+    mask.classList.add('open');
+    const r = await jget('/' + encodeURIComponent(name) + '/_settings');
+    bodyEl.textContent = r.ok ? JSON.stringify(r.json, null, 2) : ('加载失败 ' + r.code + ': ' + r.raw);
+  }
+  // closeModal: 关闭指定 id 的 modal
+  function closeModal(id) {
+    const el = $(id);
+    if (el) el.classList.remove('open');
+  }
+  // toast: 顶部浮动提示(3s 自动消失)
+  function toast(msg) {
+    let t = $('__toast');
+    if (!t) {
+      t = document.createElement('div');
+      t.id = '__toast';
+      t.style.cssText = 'position:fixed;top:20px;left:50%;transform:translateX(-50%);background:var(--bg-elevated);border:1px solid var(--border);padding:8px 16px;border-radius:6px;font-size:13px;z-index:2000;box-shadow:0 4px 12px rgba(0,0,0,0.3);transition:opacity 0.3s;';
+      document.body.appendChild(t);
+    }
+    t.textContent = msg;
+    t.style.opacity = '1';
+    clearTimeout(toast._timer);
+    toast._timer = setTimeout(() => { t.style.opacity = '0'; }, 2500);
   }
 
   // ---------- 查询构建 ----------

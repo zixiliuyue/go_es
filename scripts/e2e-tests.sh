@@ -320,6 +320,56 @@ else
   fail "主题内联脚本位置" "script=$SCRIPT_POS body=$BODY_POS"
 fi
 
+# 9i. 索引管理面板(创建/删除/mapping/settings)
+assert_contains "/_ui 索引列表 CSS 类 idxrow" 'idxrow' /tmp/last.json
+assert_contains "/_ui 索引名 CSS 类 idxname" 'idxname' /tmp/last.json
+assert_contains "/_ui 文档数 CSS 类 .meta" '.meta' /tmp/last.json
+assert_contains "/_ui 危险按钮 CSS 类" 'act danger' /tmp/last.json
+assert_contains "/_ui 有 loadIndices 函数" 'function loadIndices(' /tmp/last.json
+assert_contains "/_ui 有 newIdxName 输入" 'id="newIdxName"' /tmp/last.json
+assert_contains "/_ui 有 createIdxBtn 按钮" 'id="createIdxBtn"' /tmp/last.json
+assert_contains "/_ui 有 openCreateIndexModal 函数" 'function openCreateIndexModal(' /tmp/last.json
+assert_contains "/_ui 有 showCreateIndexModal 函数" 'function showCreateIndexModal(' /tmp/last.json
+assert_contains "/_ui 有 doCreateIndex 函数" 'function doCreateIndex(' /tmp/last.json
+assert_contains "/_ui 有 createIndexModal 引用" 'createIndexModal' /tmp/last.json
+assert_contains "/_ui 有 createIdxName 引用" 'createIdxName' /tmp/last.json
+assert_contains "/_ui 有 createIdxMapping 引用" 'createIdxMapping' /tmp/last.json
+assert_contains "/_ui 有 createIdxErr 引用" 'createIdxErr' /tmp/last.json
+assert_contains "/_ui 有 closeModal 取消按钮" "closeModal('createIndexModal')" /tmp/last.json
+assert_contains "/_ui 有 jput 创建请求" "jput('/' + encodeURIComponent" /tmp/last.json
+assert_contains "/_ui 有 mappings 字段处理" 'mappings' /tmp/last.json
+assert_contains "/_ui 有空值校验 索引名必填" '索引名必填' /tmp/last.json
+assert_contains "/_ui 有 JSON 校验错误" 'mapping 不是合法 JSON' /tmp/last.json
+assert_contains "/_ui 有 confirmDeleteIndex 函数" 'function confirmDeleteIndex(' /tmp/last.json
+assert_contains "/_ui 有 doDeleteIndex 函数" 'function doDeleteIndex(' /tmp/last.json
+assert_contains "/_ui 有 confirm 删除确认" 'confirm(' /tmp/last.json
+assert_contains "/_ui 有 jdel 删除请求" "jdel('/' + encodeURIComponent" /tmp/last.json
+assert_contains "/_ui 有 Tab 同步检查" 't.index === name' /tmp/last.json
+assert_contains "/_ui 有 openMappingModal 函数" 'function openMappingModal(' /tmp/last.json
+assert_contains "/_ui 有 mappingModal 引用" 'mappingModal' /tmp/last.json
+assert_contains "/_ui 有 mappingModalTitle 引用" 'mappingModalTitle' /tmp/last.json
+assert_contains "/_ui 有 mappingModalBody 引用" 'mappingModalBody' /tmp/last.json
+assert_contains "/_ui 有 openSettingsModal 函数" 'function openSettingsModal(' /tmp/last.json
+assert_contains "/_ui 有 settingsModal 引用" 'settingsModal' /tmp/last.json
+assert_contains "/_ui 有 settingsModalTitle 引用" 'settingsModalTitle' /tmp/last.json
+assert_contains "/_ui 有 settingsModalBody 引用" 'settingsModalBody' /tmp/last.json
+assert_contains "/_ui 有 _mapping API 路径" '/_mapping' /tmp/last.json
+assert_contains "/_ui 有 _settings API 路径" '/_settings' /tmp/last.json
+assert_contains "/_ui 有通用 closeModal 函数" 'function closeModal(' /tmp/last.json
+assert_contains "/_ui 有 toast 提示函数" 'function toast(' /tmp/last.json
+assert_contains "/_ui 侧边栏有 索引 标题" '<h2>索引</h2>' /tmp/last.json
+assert_contains "/_ui 有 indices 容器" 'id="indices"' /tmp/last.json
+assert_contains "/_ui 有 tasks 容器" 'id="tasks"' /tmp/last.json
+assert_contains "/_ui 有空态文案 无索引" '无索引' /tmp/last.json
+# 真实 HTTP 端到端: 创建索引 → 验证 mapping/settings → 删除 → 验证 404
+IDX_NAME="idx_panel_test_$(date +%s)"
+assert_status "创建索引 ${IDX_NAME}" 200 PUT "$GO_ES_URL/${IDX_NAME}"
+assert_status "获取 mapping 端点" 200 GET "$GO_ES_URL/${IDX_NAME}/_mapping"
+assert_status "获取 settings 端点" 200 GET "$GO_ES_URL/${IDX_NAME}/_settings"
+assert_status "索引在 _cat/indices 中" 200 GET "$GO_ES_URL/_cat/indices"
+assert_status "删除索引 ${IDX_NAME}" 200 DELETE "$GO_ES_URL/${IDX_NAME}"
+assert_status "删除后 mapping 返回 404" 404 GET "$GO_ES_URL/${IDX_NAME}/_mapping"
+
 # ---------- 10. gzip 协商 ----------
 header "10. gzip 协商头 (建议 #9 的 Vary 部分)"
 VARY=$(curl -s -D - -o /dev/null -H 'Accept-Encoding: gzip, deflate' "$GO_ES_URL/_health/liveness" | awk -F': ' 'tolower($1)=="vary"{print $2}' | tr -d '\r\n')

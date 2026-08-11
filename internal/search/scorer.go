@@ -162,6 +162,20 @@ func (s *Scorer) rebuildFieldStats() {
 	}
 }
 
+// onDeleteIndex 清理整个索引的 BM25 相关状态
+//
+// 说明:
+//   - 用于 ILM delete 等场景, 当索引在 engine 层被彻底移除时,
+//     必须同步 scorer 中 (index -> field) 维度的 postings/fieldLen/fieldStats
+//   - 调用者需保证与 Engine 的锁协调(本函数自带独立写锁)
+func (s *Scorer) onDeleteIndex(index string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.postings, index)
+	delete(s.fieldStats, index)
+	delete(s.fieldLen, index)
+}
+
 // lookupPostings 取一个 token 的 posting list(只读)
 func (s *Scorer) lookupPostings(index, field, token string) *PostingList {
 	s.mu.RLock()

@@ -348,6 +348,63 @@ watch_interval: 5s          # 轮询间隔(go duration)
     - YAML 支持 `tracing:` 块:`enabled`/`service_name`/`service_version`/`propagation`/`sampling_rate`
     - `config_schema.go` 新增 6 条 tracing 字段校验规则(类型/范围/枚举)
   - 单元测试:`internal/server/tracing_test.go` 35+ 用例全通过
+- 2026-08-11: 完成 #17 ILM 真执行 — **后台扫描 + rollover/delete 动作 + 真实 explain**:
+  - 新增 `internal/server/ilm_executor.go`:`ILMExecutor` 后台 goroutine 每 30s 扫描 `managed: true` 索引,按 policy.phases 的 min_age 推进 phase;命中 rollover 条件时创建新索引 + 别名切换;delete 阶段清理 store 与 engine 内存态
+  - `internal/server/extras.go::handleILMExplainForName` 改为读取真实 `ILMState` 返回(phase/rollover_count/error/managed/action)
+  - `internal/search/engine.go` 新增 `CreateIndex` / `DeleteIndex` 同步内存态;`internal/search/scorer.go` 新增 `onDeleteIndex` 清理 BM25 统计
+  - 关键修复:rollover 语义修正为 `max_age OR max_docs`(与 ES 一致);`maxAge=0` 视为"立即到期";`switchAliases` 正确读取与回写 alias 列表
+  - 单元测试:`internal/server/ilm_executor_test.go` 共 17 个用例,核心函数平均覆盖率 ≥ 85%
+  - 注意:`pkg/aggregate`、`pkg/pool`、`pkg/search` 中部分用例在 main 分支上已存在失败,与本次改动无关
+- 2026-08-11: 完成 #18 索引设置真生效 — **GET /_settings + 多索引模式 + 全量查询**:
+  - `internal/server/index_doc.go` 新增 `handleIndexSettingsForName`:`GET /{index}/_settings` 支持单索引、多索引(idx1,idx2)、通配(idx*)模式;精确名不存在返回 404,通配无匹配返回 200+空对象
+  - 新增 `handleAllSettings`:`GET /_settings` 返回全部索引的 settings
+  - 路由注册:server.go 加 `/_settings` 顶级路由 + dispatcher 内 `/{index}/_settings` 分发
+  - 单元测试:`internal/server/settings_test.go` 13 个 `TestSettings_*` 用例全通过,`handleIndexSettingsForName` 覆盖率 91.7%,`handleAllSettings` 覆盖率 85.7%
+  - 响应格式:`{index_name: {settings: {...}}}` 与 ES 兼容
+- 2026-08-11: 完成 #19 mapping 校验 — **文档写入前类型校验 + 动态字段控制**:
+  - 新增 `internal/server/mapping.go`:`MappingValidator` 核心校验模块
+    - 支持 `dynamic: true/false/strict` 三种模式(默认 true)
+    - `NewMappingValidator(mapping)` 从 IndexMeta.Mapping 构造校验器
+    - `Validate(doc)` 校验文档字段类型与动态字段合规性
+    - `validateFieldType` 支持 text/keyword/integer/long/float/double/boolean/object/nested/date 等类型校验
+    - 处理 `json.Number` 类型(因 `decodeJSON` 使用 `UseNumber()`)
+  - 集成到文档写入流程:
+    - `handleDocIndexForName`(PUT/POST `/{index}/_doc/{id}`)
+    - `handleDocIndexAutoIDForName`(POST `/{index}/_doc`)
+    - `handleUpdateForName`(POST `/{index}/_update/{id}`)
+    - 校验失败返回 400 + `mapper_parsing_exception` 错误类型
+  - 单元测试:`internal/server/mapping_test.go` 共 16 个 `TestMappingValidator_*` 用例全通过:
+    - 纯逻辑校验(无 mapping、空 mapping、dynamic=true/false/strict、17 种类型校验用例表、多字段混合、空文档、非法 dynamic、无 type 字段、格式错误等)
+    - 集成测试(validateDocMapping 直接调用、HTTP 端到端 strict/dynamic=false/no mapping/dynamic=true 模式、update 路径、auto-ID 路径)
+- 2026-08-11: 完成 #29/#30/#31/#32 安全与权限(交付 v0.6.0 M5):
+  - **#29 RBAC**(internal/server/rbac.go + rbac_extended.go):
+    - User/Role/Permission 核心模型 + 内置 superuser/admin/read/monitor 四种角色
+    - 中间件 `middlewareRBAC` 集成到 `auth → rbac → auditLog` 链路,向后兼容(auth 未启用时跳过)
+    - 路由 `/_security/user/{name}`、`/_security/role/{name}`、`/_security/whoami`、`/_security/permission` 完整 CRUD + 批量操作
+    - `requestAction(method, path)` 映射 read/write/admin/monitor/cluster 五种操作,支持通配 `logs-*`/`*-2024`/`logs-*-bak`
+    - 单元测试:`rbac_test.go`、`rbac_session_test.go`、`rbac_integration_test.go`、`rbac_extended_test.go`(若存在)全通过
+  - **#30 审计日志**(internal/server/auditlog.go):
+    - 异步 buffered channel 写入,默认关闭可通过 `/_audit/config` 热启用
+    - 端点 `GET /_audit`、`GET /_audit/stats`、`PUT /_audit/config`
+    - 中间件 `middlewareAuditLog` 自动记录写操作
+  - **#31 输入校验硬化**(internal/server/validation.go):
+    - 索引名正则 + 长度 + `_` 前缀校验;`from+size ≤ 10000`
+    - 中间件 `middlewareValidation` 支持多索引/通配符友好
+    - 全局 `SetValidationConfig`/`GetValidationConfig` 支持 YAML 热更新
+  - **#32 CORS**(internal/server/validation.go):
+    - 中间件 `middlewareCORS` 支持 `AllowedOrigins/Methods/Headers/Credentials`
+    - 预检请求(OPTIONS)200;白名单外域 403
+  - `go test ./internal/server/` 全部通过
+
+- 2026-08-11: 完成 #33 Web UI 索引管理面板(交付 v0.8.0 M7):
+  - `internal/server/web/index.html` 索引管理增强:
+    - 索引列表行:`.idxrow` CSS 类 + 名称/文档数/映射/设置/删除四按钮
+    - 创建索引模态框:`showCreateIndexModal`/`doCreateIndex` 支持 mapping JSON 粘贴与校验
+    - 删除确认:`confirmDeleteIndex` + `doDeleteIndex` 二次确认
+    - 查看模态框:`openMappingModal`(GET `/_mapping`) + `openSettingsModal`(GET `/_settings`)
+    - 通用 `closeModal(id)` + `toast(msg)` 操作反馈
+  - 单元测试:`extensions2_test.go` 新增 7 个 `TestUI_IndexPanel_*`:ListRows/CreateFlow/DeleteFlow/ViewModals/SidebarStructure/Integration/EmptyState,`go test -race` 全通过
+  - e2e:`scripts/e2e-tests.sh` section 9i,40+ 条断言(JS hook + 真实 HTTP 端到端创建/删除/查询)
 
 ### 已实现完整覆盖
 - 倒排索引查询引擎(range 已倒排化, term/match 原本就是倒排)
@@ -356,13 +413,21 @@ watch_interval: 5s          # 轮询间隔(go duration)
 - mTLS(双向证书认证)
 - gzip
 - 跨索引通配模式
-- 内置 Web UI(多 Tab + 历史 + 字段类型推断 + 拖拽排序/拖出关闭 + 导入导出 + **历史图表**)
+- 内置 Web UI(多 Tab + 历史 + 字段类型推断 + 拖拽排序/拖出关闭 + 导入导出 + **历史图表** + **索引管理面板**)
 - 配置加载 + 热更新(只读侧, addr/data/tls 启动后不可变)
 - 写合并(bulk 路径,单 doc 写仍走原路径)
 - reindex 进度精细化(batch=100) + 取消回滚
 - YAML 配置 schema 校验(启动期, 数据驱动, 错误聚合)
 - **真实快照与恢复**(#16, NDJSON 文件级, 跨 store 恢复, 完整性校验, 物理文件删除)
 - **分布式追踪**(#23, W3C TraceContext + B3 双协议透传, Span 生命周期, 日志 trace_id/span_id 关联)
+- **ILM 真执行**(#17, 后台扫描 + 多 phase + rollover + delete, 真实 explain)
+- **索引设置真生效**(#18, GET /_settings 端点, 多索引/通配/全量查询)
+- **mapping 校验**(#19, 文档写入前类型校验 + dynamic: true/false/strict 模式 + mapper_parsing_exception 错误)
+- **RBAC 权限控制**(#29, User/Role/Permission + 中间件 + 路由 `/_security/*` + 通配索引匹配)
+- **审计日志**(#30, 异步 buffered channel + `/_audit` 查询/统计/配置热更新)
+- **输入校验硬化**(#31, 索引名正则 + from+size 限制 + 中间件 + 热更新)
+- **CORS 中间件**(#32, Origin 白名单 + 预检请求 + 头注入)
+- **Web UI 索引管理面板**(#33, 索引列表/创建/删除/mapping/settings 查看 + 模态框 + 二次确认)
 
 ### 待办(更长期)
 (所有本期工作已完成; 后续按需增量)

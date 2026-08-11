@@ -585,3 +585,159 @@ func TestUI_ThemeControlInHeader(t *testing.T) {
 	assert.Contains(t, headerHTML, "id=\"themeSelect\"", "主题控件应在 header 内")
 	assert.Contains(t, headerHTML, "class=\"themeswitch\"", "主题控件容器应在 header 内")
 }
+
+// ---------- 索引管理面板 ----------
+
+// 1) /_ui 索引管理面板: 索引列表行(名称 + 文档数 + 映射/设置/删除按钮)
+func TestUI_IndexPanel_ListRows(t *testing.T) {
+	ts := newTestServer(t)
+	resp, body := do(t, ts, "GET", "/_ui", nil)
+	assert.Equal(t, 200, resp.StatusCode)
+	html := string(body)
+	required := []string{
+		"function loadIndices(",     // 加载索引列表
+		"idxrow",                   // CSS 类: 索引行
+		"idxname",                  // CSS 类: 索引名
+		"idxname.active",           // CSS 类: 选中态
+		"idxrow .meta",             // CSS 类: 文档数
+		"act danger",               // CSS 类: 危险按钮
+		"idxrow .act:hover",        // CSS hover 态
+		"idxrow .act.danger:hover", // 删除按钮 hover 态
+	}
+	for _, s := range required {
+		assert.Contains(t, html, s, "/_ui 应含索引列表 hook: %s", s)
+	}
+}
+
+// 2) /_ui 创建索引模态框 + 创建函数(支持 mapping JSON)
+func TestUI_IndexPanel_CreateFlow(t *testing.T) {
+	ts := newTestServer(t)
+	resp, body := do(t, ts, "GET", "/_ui", nil)
+	assert.Equal(t, 200, resp.StatusCode)
+	html := string(body)
+	required := []string{
+		"id=\"newIdxName\"",                  // 侧边栏新建输入框
+		"id=\"createIdxBtn\"",                // 新建按钮
+		"function openCreateIndexModal(",      // 打开模态框
+		"function showCreateIndexModal(",      // 显示模态框
+		"function doCreateIndex(",            // 创建索引主函数
+		"createIndexModal",                    // 创建索引模态框 JS 引用
+		"createIdxName",                       // 模态框内索引名输入 JS 引用
+		"createIdxMapping",                    // 模态框内 mapping textarea JS 引用
+		"createIdxErr",                        // 错误提示元素 JS 引用
+		"closeModal('createIndexModal')",      // 取消按钮
+		"jput('/' + encodeURIComponent",       // 创建请求
+		"mappings",                            // mapping 字段处理
+		"索引名必填",                           // 空值校验
+		"mapping 不是合法 JSON",                // JSON 校验错误
+		"toast('索引 '",                       // 成功提示
+	}
+	for _, s := range required {
+		assert.Contains(t, html, s, "/_ui 应含创建索引 hook: %s", s)
+	}
+}
+
+// 3) /_ui 删除索引流程(确认对话框 + 实际 API 调用)
+func TestUI_IndexPanel_DeleteFlow(t *testing.T) {
+	ts := newTestServer(t)
+	resp, body := do(t, ts, "GET", "/_ui", nil)
+	assert.Equal(t, 200, resp.StatusCode)
+	html := string(body)
+	required := []string{
+		"function confirmDeleteIndex(", // 二次确认函数
+		"function doDeleteIndex(",       // 执行删除函数
+		"confirm('确认删除索引",          // 浏览器原生确认
+		"jdel('/' + encodeURIComponent", // 删除请求
+		"t.index === name",              // Tab 同步检查
+		"toast('索引 '",                 // 成功提示(删除成功)
+		"已删除",                         // 删除成功文案
+	}
+	for _, s := range required {
+		assert.Contains(t, html, s, "/_ui 应含删除索引 hook: %s", s)
+	}
+}
+
+// 4) /_ui mapping + settings 查看模态框
+func TestUI_IndexPanel_ViewModals(t *testing.T) {
+	ts := newTestServer(t)
+	resp, body := do(t, ts, "GET", "/_ui", nil)
+	assert.Equal(t, 200, resp.StatusCode)
+	html := string(body)
+	required := []string{
+		"function openMappingModal(",    // mapping 模态框
+		"mappingModal",                   // mapping 模态框 JS 引用
+		"mappingModalTitle",              // mapping 标题 JS 引用
+		"mappingModalBody",               // mapping 内容 JS 引用
+		"function openSettingsModal(",   // settings 模态框
+		"settingsModal",                  // settings 模态框 JS 引用
+		"settingsModalTitle",             // settings 标题 JS 引用
+		"settingsModalBody",              // settings 内容 JS 引用
+		"/_mapping",                      // mapping API 路径
+		"/_settings",                     // settings API 路径
+		"closeModal('mappingModal')",     // mapping 关闭
+		"closeModal('settingsModal')",    // settings 关闭
+		"function closeModal(",           // 通用关闭函数
+	}
+	for _, s := range required {
+		assert.Contains(t, html, s, "/_ui 应含查看模态框 hook: %s", s)
+	}
+}
+
+// 5) /_ui 索引管理面板: 侧边栏结构完整(索引标题 + 创建区 + 列表区 + 任务区)
+func TestUI_IndexPanel_SidebarStructure(t *testing.T) {
+	ts := newTestServer(t)
+	resp, body := do(t, ts, "GET", "/_ui", nil)
+	assert.Equal(t, 200, resp.StatusCode)
+	html := string(body)
+	required := []string{
+		"<h2>索引</h2>",     // 索引标题
+		"id=\"indices\"",    // 索引列表容器
+		"id=\"tasks\"",      // 任务列表
+		"id=\"newIdxName\"", // 新建输入
+		"newidx",            // CSS 类: 新建输入
+		"createbtn",         // CSS 类: 创建按钮
+		"idxhead",           // CSS 类: 索引头部区
+	}
+	for _, s := range required {
+		assert.Contains(t, html, s, "/_ui 侧边栏应含: %s", s)
+	}
+}
+
+// 6) /_ui 真实 HTTP 端到端: 创建索引 → 验证列表 → 删除 → 验证消失
+func TestUI_IndexPanel_Integration(t *testing.T) {
+	ts := newTestServer(t)
+	// 创建索引
+	resp, body := do(t, ts, "PUT", "/test_idx_panel", nil)
+	assert.Equal(t, 200, resp.StatusCode)
+
+	// 验证 _cat/indices 包含该索引
+	resp, body = do(t, ts, "GET", "/_cat/indices", nil)
+	assert.Equal(t, 200, resp.StatusCode)
+	assert.Contains(t, string(body), "test_idx_panel")
+
+	// 验证 _mapping 端点可用
+	resp, body = do(t, ts, "GET", "/test_idx_panel/_mapping", nil)
+	assert.Equal(t, 200, resp.StatusCode)
+
+	// 验证 _settings 端点可用
+	resp, body = do(t, ts, "GET", "/test_idx_panel/_settings", nil)
+	assert.Equal(t, 200, resp.StatusCode)
+
+	// 删除索引
+	resp, body = do(t, ts, "DELETE", "/test_idx_panel", nil)
+	assert.Equal(t, 200, resp.StatusCode)
+
+	// 验证索引已删除
+	resp, body = do(t, ts, "GET", "/test_idx_panel/_mapping", nil)
+	assert.Equal(t, 404, resp.StatusCode)
+}
+
+// 7) /_ui 验证空索引列表时的空态提示
+func TestUI_IndexPanel_EmptyState(t *testing.T) {
+	ts := newTestServer(t)
+	resp, body := do(t, ts, "GET", "/_ui", nil)
+	assert.Equal(t, 200, resp.StatusCode)
+	html := string(body)
+	assert.Contains(t, html, "无索引", "应有空态文案(无索引)")
+	assert.Contains(t, html, "class=\"empty\"", "应有 empty CSS 类")
+}
