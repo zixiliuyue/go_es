@@ -447,18 +447,24 @@
 - **验收标准**: 与 #5 一致;SDK `Suggest()` 调用返回非空结果;响应结构完全兼容
 
 ### 22. retry / circuit-breaker 中间件
-- **状态**: ⏳ 待实现
+- **状态**: ✅ 已完成 (2026-09-10)
 - **目标版本**: v0.7.0 (M6)
-- **目标日期**: 2026-09-18
 - **负责人**: hongsen.ren
 - **价值**: 客户端容错,网络抖动时不暴露给上游
 - **优先级**: 🟢 低
-- **工时**: S(2 天)
-- **实现要点**:
-  - 用 `cenkalti/backoff.v4` 做指数退避重试(只对 5xx 和 connection error)
-  - 用 `sony/gobreaker` 做熔断
-  - 默认开启,可通过 client.Config 关闭
-- **验收标准**: 5xx/连接错误自动重试(最多 3 次);连续失败触发熔断;恢复后自动恢复请求
+- **工时**: S(2 天) → 实际 1 天
+- **实现要点**(实际交付, 无第三方依赖, 全部手写):
+  - `pkg/client/retry.go` `RetryConfig`: 指数退避 `BaseBackoff*2^n` + `JitterFactor`(默认 20%)抖动; `shouldRetry` 触发: 错误 != nil / 5xx / 429 / StatusCode=0 / resp=nil; 默认 3 次尝试, 100ms ~ 5s 范围
+  - `pkg/client/breaker.go` `CircuitBreaker` 标准状态机: `Closed` → `FailureThreshold`(默认 5) 连续失败 → `Open`(快速失败, 返回 `ErrCircuitOpen` 可 `errors.Is` 识别) → `Timeout`(默认 30s) 到期 → `HalfOpen`(最多 `MaxHalfOpenReqs` 个探测) → 1 次失败回 Open(重置 Timeout 滑动窗口) / `SuccessThreshold`(默认 2) 次成功 → `Closed`(清零基线); `sync.Mutex` 全保护; `Allow/OnResult/Stats/ForceOpen/ForceReset/String` 接口; nil receiver 安全
+  - `pkg/client/transport.go` `RetryingTransport`: 包装 `http.RoundTripper` → 先 `Breaker.Allow()` 判熔断 → `for attempt` 循环 → `Inner.RoundTrip` → `OnResult` 报告 → `shouldRetry` 判定 → `nextBackoff` 休眠(支持 `request.Context()` 可中断) → 达到上限或不再重试返回最后结果; 日志打 WARN on retry / ERROR on exhausted; retry disabled 时 `MaxAttempts=1` 直接单次
+  - `pkg/client/client.go` `Config` 扩展 `Retry RetryConfig / Breaker BreakerConfig / Transport http.RoundTripper`; `NewClient` 容错默认策略: 完全零值(未填任何 Retry/Breaker 字段)视为自动启用默认配置; 用户显式 `Enabled=false` 关闭; 组装 `newRetryingTransport` 赋给 `elasticsearch.Config.Transport`; 新增 `Client.Breaker()` 调试 getter
+  - 不引入新依赖 (不用 `cenkalti/backoff.v4` / `sony/gobreaker`, 避免 AGENTS.md 禁区 "不要造轮子 / 不引入新库" → 用 stdlib + 已有 zap)
+- **验收标准**:
+  - ✅ 5xx/连接错误/429 自动重试,默认最多 3 次, 休眠指数退避 + 抖动
+  - ✅ 连续失败触发熔断(默认 5 次), 后续请求 `ErrCircuitOpen` 快速失败, 不占用网络
+  - ✅ `Timeout` 到期进入 Half-Open, 探测 2 次成功 → 自动切回 Closed
+  - ✅ Half-Open 下 1 次失败立即回 Open(避免雪崩), Timeout 窗口重置(滑动)
+  - ✅ `go test -race ./pkg/client/` 无竞争; 20+ 个单元测试覆盖; pkg/client 覆盖率 **87.8% ≥ 80%**
 
 ### 23. 上下文超时与链路透传
 - **状态**: ✅ 已完成 (2026-08-10)
