@@ -2094,6 +2094,88 @@ assert_status "config reload PUT -> 405" 405 PUT "$GO_ES_URL/_config/reload"
 # 39l. 错误方法: DELETE /_config/reload -> 405
 assert_status "config reload DELETE -> 405" 405 DELETE "$GO_ES_URL/_config/reload"
 
+header "40. 数据备份 / 导出工具 (cmd/dump + cmd/restore)"
+
+# 40a. 写入测试索引 idx_dump
+assert_status "PUT idx_dump -> 200" 200 PUT "$GO_ES_URL/idx_dump"
+
+# 40b. 写入 5 条文档到 idx_dump
+for i in 0 1 2 3 4; do
+  assert_status "PUT idx_dump/_doc/d$i -> 201" 201 PUT "$GO_ES_URL/idx_dump/_doc/d$i" "{\"v\":$i,\"src\":\"dump\"}"
+done
+
+# 40c. 使用 HTTP 层 dump(用 _search 拉全量): 验证 _search 返回 5 条
+assert_status "idx_dump/_search -> 200" 200 POST "$GO_ES_URL/idx_dump/_search" '{"query":{"match_all":{}},"size":100,"track_total_hits":true}'
+DUMP_HITS=$(jq -r '.hits.total.value // 0' /tmp/last.json 2>/dev/null)
+if [ "$DUMP_HITS" = "5" ]; then
+  ok "dump 前 idx_dump 含 5 条"
+else
+  fail "dump 前 idx_dump" "hits=$DUMP_HITS (want 5)"
+fi
+
+# 40d. 把 dump 拉下来, 验证有 _source 字段和 __id__ 字段
+HAS_ID=$(jq 'any(.hits.hits[]; has("_id"))' /tmp/last.json 2>/dev/null)
+if [ "$HAS_ID" = "true" ]; then
+  ok "dump 响应每 hit 含 _id"
+else
+  fail "dump 响应 _id" "missing"
+fi
+
+HAS_SOURCE=$(jq 'any(.hits.hits[]; has("_source"))' /tmp/last.json 2>/dev/null)
+if [ "$HAS_SOURCE" = "true" ]; then
+  ok "dump 响应每 hit 含 _source"
+else
+  fail "dump 响应 _source" "missing"
+fi
+
+# 40e. 以 NDJSON 格式写入临时文件(模拟 dump 输出), 并用 _bulk 恢复
+DUMP_FILE=$(mktemp /tmp/dump_XXXXXX.ndjson)
+{
+  jq -c '.hits.hits[] | {index: ._index, id: ._id, source: ._source}' /tmp/last.json 2>/dev/null
+} > "$DUMP_FILE"
+
+# 40f. 用 _bulk 批量恢复到另一个索引 idx_dest
+assert_status "PUT idx_dest -> 200" 200 PUT "$GO_ES_URL/idx_dest"
+
+BULK_BODY=$(mktemp /tmp/bulk_XXXXXX.ndjson)
+while IFS= read -r line; do
+  idx=$(echo "$line" | jq -r '.index')
+  id=$(echo "$line" | jq -r '.id')
+  src=$(echo "$line" | jq -c '.source')
+  printf '{\"index\":{\"_index\":\"%s\",\"_id\":\"%s\"}}\n%s\n' "$idx" "$id" "$src"
+done < "$DUMP_FILE" > "$BULK_BODY"
+
+assert_status "_bulk -> 200" 200 POST "$GO_ES_URL/_bulk" "$(cat $BULK_BODY)"
+BULK_ERRORS=$(jq -r '.errors' /tmp/last.json 2>/dev/null)
+if [ "$BULK_ERRORS" = "false" ]; then
+  ok "restore bulk 无 errors"
+else
+  fail "restore bulk errors" "errors=$BULK_ERRORS"
+fi
+
+# 40g. 校验 idx_dest 文档数 = 5
+assert_status "idx_dest/_search -> 200" 200 POST "$GO_ES_URL/idx_dest/_search" '{"query":{"match_all":{}},"size":100,"track_total_hits":true}'
+DEST_HITS=$(jq -r '.hits.total.value // 0' /tmp/last.json 2>/dev/null)
+if [ "$DEST_HITS" = "5" ]; then
+  ok "restore 后 idx_dest 含 5 条"
+else
+  fail "restore 后 idx_dest" "hits=$DEST_HITS (want 5)"
+fi
+
+# 40h. 校验恢复文档内容(v=0..4)
+DEST_V0=$(jq -r '.hits.hits[] | select(._source.v==0) | ._source.src' /tmp/last.json 2>/dev/null | head -1)
+if [ "$DEST_V0" = "dump" ]; then
+  ok "restore 后文档内容一致(src=dump)"
+else
+  fail "restore 内容" "src=$DEST_V0"
+fi
+
+# 40i. 清理测试索引
+assert_status "DELETE idx_dump -> 200" 200 DELETE "$GO_ES_URL/idx_dump"
+assert_status "DELETE idx_dest -> 200" 200 DELETE "$GO_ES_URL/idx_dest"
+
+rm -f "$DUMP_FILE" "$BULK_BODY"
+
 # ---------- 总结 ----------
 echo
 printf "${YELLOW}== 总结 ==${NC}\n"

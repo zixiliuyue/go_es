@@ -156,5 +156,87 @@ if "$SCHEMA_BIN" -config "$TMPDIR_SCHEMA/auth_nocred.yaml" >"$TMPDIR_SCHEMA/auth
 fi
 echo "[test-in-docker] PASS: auth.enabled=true 无凭据启动被拒绝"
 
+# ---------- dump/restore CLI e2e (host-side, 在容器外验证) ----------
+echo "[test-in-docker] dump/restore CLI e2e (host-side)..."
+TMPDIR_DUMP="$(mktemp -d -t go_es_dump.XXXXXX)"
+trap 'rm -rf "$TMPDIR_DUMP"' EXIT
+DUMP_BIN="$TMPDIR_DUMP/dump"
+RESTORE_BIN="$TMPDIR_DUMP/restore"
+
+if ! (cd "$ROOT" && CGO_ENABLED=0 go build -o "$DUMP_BIN" ./cmd/dump) >"$TMPDIR_DUMP/build_dump.log" 2>&1; then
+  echo "[test-in-docker] FAIL: 构建 cmd/dump 失败"
+  cat "$TMPDIR_DUMP/build_dump.log"
+  exit 1
+fi
+if ! (cd "$ROOT" && CGO_ENABLED=0 go build -o "$RESTORE_BIN" ./cmd/restore) >"$TMPDIR_DUMP/build_restore.log" 2>&1; then
+  echo "[test-in-docker] FAIL: 构建 cmd/restore 失败"
+  cat "$TMPDIR_DUMP/build_restore.log"
+  exit 1
+fi
+
+DUMP_URL="http://localhost:$HOST_GO_ES_PORT"
+
+# 建测试索引
+curl -sS -X PUT "$DUMP_URL/cli_idx" >/dev/null
+curl -sS -X PUT "$DUMP_URL/cli_dest" >/dev/null
+
+# 写 6 条文档
+for i in $(seq 0 5); do
+  curl -sS -X PUT "$DUMP_URL/cli_idx/_doc/d$i" -H "Content-Type: application/json" -d "{\"v\":$i,\"src\":\"cli\"}" >/dev/null
+done
+
+# dump 到文件
+DUMP_FILE="$TMPDIR_DUMP/out.ndjson"
+"$DUMP_BIN" -url "$DUMP_URL" -idx cli_idx -out "$DUMP_FILE" >"$TMPDIR_DUMP/dump.stdout" 2>&1
+DUMP_RC=$?
+if [ "$DUMP_RC" -ne 0 ]; then
+  echo "[test-in-docker] FAIL: cmd/dump 返回非 0 rc=$DUMP_RC"
+  cat "$TMPDIR_DUMP/dump.stdout"
+  exit 1
+fi
+if [ ! -s "$DUMP_FILE" ]; then
+  echo "[test-in-docker] FAIL: dump 输出文件为空"
+  exit 1
+fi
+# 文件应包含 dump_version = 6 个文档 + 1 行 __dump_meta__
+DUMP_LINES=$(wc -l < "$DUMP_FILE" | tr -d ' ')
+if [ "$DUMP_LINES" -ge 7 ]; then
+  echo "[test-in-docker] PASS: dump 输出含 $DUMP_LINES 行 (>= 7)"
+else
+  echo "[test-in-docker] FAIL: dump 输出行数 $DUMP_LINES < 7"
+  exit 1
+fi
+
+# restore 到 cli_dest
+"$RESTORE_BIN" -url "$DUMP_URL" -in "$DUMP_FILE" -target-idx cli_dest >"$TMPDIR_DUMP/restore.stdout" 2>&1
+RESTORE_RC=$?
+if [ "$RESTORE_RC" -ne 0 ]; then
+  echo "[test-in-docker] FAIL: cmd/restore 返回非 0 rc=$RESTORE_RC"
+  cat "$TMPDIR_DUMP/restore.stdout"
+  exit 1
+fi
+
+# 校验 cli_dest 文档数 = 6
+DEST_COUNT=$(curl -sS -X POST "$DUMP_URL/cli_dest/_search" -H "Content-Type: application/json" -d '{"query":{"match_all":{}},"size":100,"track_total_hits":true}' | jq -r '.hits.total.value // 0')
+if [ "$DEST_COUNT" = "6" ]; then
+  echo "[test-in-docker] PASS: restore 后 cli_dest 含 6 条"
+else
+  echo "[test-in-docker] FAIL: restore 后 cli_dest 含 $DEST_COUNT 条 (want 6)"
+  exit 1
+fi
+
+# 校验内容一致
+SRC_VAL=$(curl -sS -X POST "$DUMP_URL/cli_dest/_search" -H "Content-Type: application/json" -d '{"query":{"match_all":{}},"size":100}' | jq -r '.hits.hits[0]._source.src // ""')
+if [ "$SRC_VAL" = "cli" ]; then
+  echo "[test-in-docker] PASS: restore 后文档内容 src=cli"
+else
+  echo "[test-in-docker] FAIL: restore 后文档 src=$SRC_VAL"
+  exit 1
+fi
+
+# 清理
+curl -sS -X DELETE "$DUMP_URL/cli_idx" >/dev/null
+curl -sS -X DELETE "$DUMP_URL/cli_dest" >/dev/null
+
 echo "[test-in-docker] 全部通过"
 exit 0

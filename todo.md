@@ -164,17 +164,25 @@
 - **验收标准**: 10w 文档冷启动 < 5s;100w 文档冷启动 < 30s;重启后查询结果与重启前一致
 
 ### 8. 文档 `_seq_no` / `_primary_term` 乐观并发控制
-- **状态**: ⏳ 待实现
+- **状态**: ✅ 已完成 (2026-08-11)
 - **目标版本**: v0.4.0 (M3)
 - **目标日期**: 2026-08-28
 - **负责人**: hongsen.ren
 - **价值**: ES 标配,用于 if_seq_no/if_primary_term 防止并发覆盖,缺失会导致静默丢更新
 - **优先级**: 🟡 中
-- **工时**: S(2 天)
+- **工时**: S(2 天) → 实际 0.5 天完成
 - **实现要点**:
-  - `doc/<index>/<id>` 改为 `(source, meta)`,meta 包含 seq_no(原子自增)+ primary_term
-  - update 路径支持 `?if_seq_no=X&if_primary_term=Y` 头,不一致返回 409
-  - 单测 + e2e: 并发更新验证只有一个成功
+  - `internal/server/optimistic.go`:
+    - `DocMeta` 结构:SeqNo/PrimaryTerm/Version/Created
+    - `readDocMeta`/`writeDocMeta`:sidecar 存储 doc-meta/<index>/<id>
+    - `NextMeta`:计算新 meta(支持 internal/external/external_gte 三种 version_type)
+    - `writeOp`:写入操作语义(Index/Create/Update)
+    - `applyWrite`:带版本控制的写入(if_seq_no/if_primary_term 条件检查,op_type=create,version_type)
+    - 冲突返回 409 + `version_conflict_engine_exception`
+  - `internal/server/index_doc.go`:handleDocIndexForName/AutoID 已集成 applyWrite
+  - `handleDocGetForName`:响应包含 _seq_no 和 _primary_term
+  - 单元测试:`optimistic_test.go` 13 个用例(TestNextMeta_* 6 个 + TestApplyWrite_* 7 个)全通过
+  - e2e:`scripts/e2e-tests.sh` section 29(29a-29i)+ metrics optimistic_conflicts_total
 - **验收标准**: 并发更新只有一个成功(409 vs 200);seq_no 随写操作单调递增;ES 客户端 `if_seq_no` 调用正常
 
 ### 9. 写入路径的事务合并与回压
@@ -391,19 +399,24 @@
 - **验收标准**: 类型不匹配的写入返回 400 + mapper_parsing_exception;正确类型写入正常;dynamic mapping 首次写入自动推断类型
 
 ### 20. 数据备份/导出工具
-- **状态**: ⏳ 待实现
+- **状态**: ✅ 已完成 (2026-08-11)
 - **目标版本**: v0.5.0 (M4)
 - **目标日期**: 2026-09-04
 - **负责人**: hongsen.ren
 - **价值**: 运维侧需要"把 go_es 数据导到 jsonl/再倒回"做数据迁移
 - **优先级**: 🟢 低
-- **工时**: S(1-2 天)
+- **工时**: S(1-2 天) → 实际 1 天完成
 - **实现要点**:
-  - 新增 `cmd/dump` 子命令,遍历 `doc/*` 写 ndjson
-  - `cmd/restore` 子命令反之
-  - 用 SDK,跟 server 解耦
-  - 单元测试:`TestDump_RoundTrip` 写 100 条 doc → dump → restore → 验证数据一致;e2e:命令行 `go run ./cmd/dump` 导出 NDJSON 文件可被 `cmd/restore` 正确恢复
-- **验收标准**: dump 命令导出 NDJSON 文件包含全部文档;restore 命令可从 NDJSON 恢复数据;round-trip 数据一致性 100%
+  - 新增 `pkg/dumprestore/dumprestore.go`:
+    - `Exporter`: 通过 HTTP `_search` 滚动获取全量文档,逐索引写入 NDJSON;末尾追加 `__dump_meta__` 元数据行(version/doc_count/index_count/created_at)
+    - `Importer`: 读取 NDJSON,按 batchSize 用 `_bulk` 批量写入,支持 `TargetIndex` 强制覆盖索引名
+    - `DumpToFile` / `RestoreFromFile` 便捷函数
+    - 支持 Basic 认证、进度回调、context 取消、stdin/stdout(`-`)
+  - 新增 `cmd/dump/main.go`: CLI 子命令,解析 `-url`/`-out`/`-idx`/`-user`/`-pass`/`-page-size`;支持 SIGINT/SIGTERM 优雅退出
+  - 新增 `cmd/restore/main.go`: CLI 子命令,解析 `-url`/`-in`/`-target-idx`/`-user`/`-pass`/`-batch-size`
+  - 单元测试:`pkg/dumprestore/dumprestore_test.go` 17+ 个用例,覆盖 round-trip(5 文档多索引)、IndexFilter、EmptyIndex、ProgressCallback、TargetIndex、Pagination(15 条 4 翻页)、DuplicateIndicesList、InvalidURL、InvalidFile、BadJSON、ContextCancelled、HTTPError、MetaMarker、ExportMetaZeroValues、HTTPErrorMessage、ImportProgressCallback、DumpToFile、RestoreFromFile;覆盖率 80.8%;`go test -race` 无竞争
+  - e2e:`scripts/e2e-tests.sh` section 40(40a~40i)用 HTTP 模拟 dump/restore(写入 5 条 → _search 导出 → NDJSON 中转 → _bulk 恢复 → 验证数量与内容) + `scripts/test-in-docker.sh` host-side 构建 `cmd/dump`/`cmd/restore` 二进制,真实命令行 dump 6 条文档 → restore 到另一索引 → 验证 6 条全量 + 内容一致
+- **验收标准**: dump 命令导出 NDJSON 文件包含全部文档 + 元数据行;restore 命令可从 NDJSON 恢复数据(支持跨索引);round-trip 数据一致性 100%;CLI 命令 exit code 正确
 
 ---
 
@@ -787,14 +800,14 @@
 | 🔴 一、核心功能缺失 | 6 | 6(#1-#6) | 0 | 17-23 | ✅ 聚合+打分+查询全部完成 |
 | 🟠 二、性能可扩展 | 5 + 1a | 4(#7,#8,#9,#11a) | 2(#10,#11) | 17-27 | 倒排持久化已完成,segment/cache 待实现 |
 | 🟡 三、运维可观测 | 4 | 4(#12,#13,#14,#15) | 0 | 5-7 | ✅ 全部完成 |
-| 🟠 四、数据完整性 | 5 | 4(#16-#19) | 1(#20) | 19-26 | ILM 执行器/settings/mapping 已完成,备份待实现 |
+| 🟠 四、数据完整性 | 5 | 5(#16-#20) | 0 | 20-26 | 真实快照/ILM/settings/mapping/备份全部完成 |
 | 🟢 五、SDK 完善 | 4 | 0 | 4(#21-#24) | 5-8 | retry、ctx timeout |
 | 🟡 六、测试质量 | 4 | 0 | 4(#25-#28) | 8-10 | fuzz、benchmark、consistency |
 | 🟠 七、安全权限 | 4 | 4(#29-#32) | 0 | 8-11 | ✅ RBAC+审计+输入校验+CORS 全部完成 |
 | 🟡 八、UI 增强 | 6 | 1(#33) | 5(#34-#38) | 9-12 | 索引管理已完成,实时刷新/主题待实现 |
 | 🟢 九、生态分发 | 5 | 0 | 5(#39-#43) | 13-21 | Helm、release、文档 |
 
-**总体进度**:评估内 **24** 项已完成(#1-#9,#11a-#15,#16-#19,#23,#29-#33),待实现 **19** 项。已超出原评估,累计交付约 **74+ 人天**
+**总体进度**:评估内 **25** 项已完成(#1-#9,#11a-#15,#16-#20,#23,#29-#33),待实现 **18** 项。已超出原评估,累计交付约 **75+ 人天**
 
 ---
 

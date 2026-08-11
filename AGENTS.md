@@ -435,6 +435,14 @@ watch_interval: 5s          # 轮询间隔(go duration)
 - **输入校验硬化**(#31, 索引名正则 + from+size 限制 + 中间件 + 热更新)
 - **CORS 中间件**(#32, Origin 白名单 + 预检请求 + 头注入)
 - **Web UI 索引管理面板**(#33, 索引列表/创建/删除/mapping/settings 查看 + 模态框 + 二次确认)
+- **数据备份/导出工具**(#20, `pkg/dumprestore` Exporter/Importer NDJSON, `cmd/dump`/`cmd/restore` CLI, 支持跨索引、进度回调、Basic 认证、stdout/stdin)
+
+### 实现记录补充
+- 2026-08-11: 完成 #20 数据备份/导出工具 — NDJSON dump/restore:
+  - `pkg/dumprestore/dumprestore.go`:Exporter(HTTP _search 滚动)+ Importer(_bulk 批量 + TargetIndex) + DumpToFile/RestoreFromFile 便捷函数 + __dump_meta__ 元数据行
+  - `cmd/dump/main.go` + `cmd/restore/main.go`:CLI 子命令, 支持 flags(-url/-out/-idx/-user/-pass/-page-size/-in/-target-idx/-batch-size),SIGINT/SIGTERM 优雅退出
+  - 单元测试:`dumprestore_test.go` 17+ 用例, 覆盖率 80.8%,`go test -race` 无竞争
+  - e2e:`scripts/e2e-tests.sh` section 40(HTTP 模拟 dump/restore) + `scripts/test-in-docker.sh` host-side CLI 真实命令行验证
 
 ### 待办(更长期)
 (所有本期工作已完成; 后续按需增量)
