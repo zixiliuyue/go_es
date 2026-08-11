@@ -84,12 +84,19 @@ func TestSlowLog_StatsEndpoint(t *testing.T) {
 func TestSlowLog_ConfigAndResetEndpoints(t *testing.T) {
 	s := newObsTestServer(t)
 
-	// 无效阈值
+	// 无效阈值(超过上限)
 	req := httptest.NewRequest(http.MethodPut, "/_slowlog/config",
-		bodyReader(t, `{"threshold_ms":0}`))
+		bodyReader(t, `{"threshold_ms":60001}`))
 	w := httptest.NewRecorder()
 	s.handleSlowLogConfig(w, req)
 	assert.Equal(t, http.StatusBadRequest, w.Code)
+
+	// 无效阈值(JSON 格式错误, 把数字写成字符串)
+	req = httptest.NewRequest(http.MethodPut, "/_slowlog/config",
+		bodyReader(t, `{"threshold_ms":"notanumber"}`))
+	w = httptest.NewRecorder()
+	s.handleSlowLogConfig(w, req)
+	assert.Equal(t, http.StatusBadRequest, w.Code, "threshold_ms 非数字应报 parse 错误")
 
 	// 有效阈值
 	req = httptest.NewRequest(http.MethodPut, "/_slowlog/config",
@@ -104,6 +111,252 @@ func TestSlowLog_ConfigAndResetEndpoints(t *testing.T) {
 	w = httptest.NewRecorder()
 	s.handleSlowLogReset(w, req)
 	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+// ---------- #15 新增: Log5xx / Error5xx / ApplySlowLogConfig / 中间件 ----------
+
+func TestSlowLog_Log5xx_SetGet(t *testing.T) {
+	// 默认 true
+	assert.True(t, GetSlowLog5xx(), "Log5xx 默认应为 true")
+
+	SetSlowLog5xx(false)
+	assert.False(t, GetSlowLog5xx())
+
+	SetSlowLog5xx(true)
+	assert.True(t, GetSlowLog5xx())
+}
+
+func TestSlowLog_RecordError5xxAndStats(t *testing.T) {
+	ResetSlowStats()
+	RecordError5xx()
+	RecordError5xx()
+	RecordSlowRequest(2000)
+
+	stats := SlowStats()
+	assert.EqualValues(t, 1, stats.SlowCount, "慢请求应只有 1 条")
+	assert.EqualValues(t, 2, stats.Error5xxCount, "5xx 错误应计数 2")
+	assert.NotEmpty(t, stats.LastError5xxTime, "LastError5xxTime 应非空")
+	assert.Equal(t, GetSlowLog5xx(), stats.Log5xx, "stats.Log5xx 应与全局一致")
+}
+
+func TestSlowLog_Reset_Incl5xx(t *testing.T) {
+	RecordSlowRequest(1000)
+	RecordError5xx()
+	ResetSlowStats()
+	stats := SlowStats()
+	assert.EqualValues(t, 0, stats.SlowCount)
+	assert.EqualValues(t, 0, stats.Error5xxCount)
+	assert.Empty(t, stats.LastSlowTime)
+	assert.Empty(t, stats.LastError5xxTime)
+}
+
+func TestSlowLog_ApplySlowLogConfig(t *testing.T) {
+	// 先设置一个基线
+	SetSlowThreshold(500)
+	SetSlowLog5xx(true)
+
+	// 情况1: 传 ThresholdMs=1000 + Log5xx=false
+	bFalse := false
+	ApplySlowLogConfig(SlowLogConfig{ThresholdMs: 1000, Log5xx: &bFalse})
+	assert.EqualValues(t, 1000, GetSlowThreshold())
+	assert.False(t, GetSlowLog5xx())
+
+	// 情况2: 传零值(不修改)
+	ApplySlowLogConfig(SlowLogConfig{ThresholdMs: 0, Log5xx: nil})
+	assert.EqualValues(t, 1000, GetSlowThreshold(), "0 表示未设置, 不应修改阈值")
+	assert.False(t, GetSlowLog5xx(), "nil 指针表示未设置, 不应修改 Log5xx")
+
+	// 情况3: 负数 -> 内部 SetSlowThreshold 兜底为默认
+	ApplySlowLogConfig(SlowLogConfig{ThresholdMs: -1})
+	assert.EqualValues(t, 500, GetSlowThreshold(), "负数阈值应兜底为默认 500")
+}
+
+func TestSlowLog_ConfigEndpoint_Log5xx(t *testing.T) {
+	s := newObsTestServer(t)
+	// 先还原
+	SetSlowLog5xx(true)
+	SetSlowThreshold(500)
+
+	// 只传 log_5xx: false
+	req := httptest.NewRequest(http.MethodPut, "/_slowlog/config",
+		bodyReader(t, `{"log_5xx":false}`))
+	w := httptest.NewRecorder()
+	s.handleSlowLogConfig(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.False(t, GetSlowLog5xx(), "log_5xx 应设为 false")
+	// 阈值不应变
+	assert.EqualValues(t, 500, GetSlowThreshold())
+
+	// 同时传 threshold_ms + log_5xx
+	req = httptest.NewRequest(http.MethodPut, "/_slowlog/config",
+		bodyReader(t, `{"threshold_ms":300,"log_5xx":true}`))
+	w = httptest.NewRecorder()
+	s.handleSlowLogConfig(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.EqualValues(t, 300, GetSlowThreshold())
+	assert.True(t, GetSlowLog5xx())
+
+	// 响应体字段校验
+	var resp map[string]any
+	assert.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, true, resp["log_5xx"])
+	assert.Equal(t, true, resp["updated"])
+}
+
+func TestSlowLog_ConfigEndpoint_MethodNotAllowed(t *testing.T) {
+	s := newObsTestServer(t)
+	// stats 用 POST -> 405
+	req := httptest.NewRequest(http.MethodPost, "/_slowlog/stats", nil)
+	w := httptest.NewRecorder()
+	s.handleSlowLogStats(w, req)
+	assert.Equal(t, http.StatusMethodNotAllowed, w.Code)
+
+	// config 用 GET -> 405
+	req = httptest.NewRequest(http.MethodGet, "/_slowlog/config", nil)
+	w = httptest.NewRecorder()
+	s.handleSlowLogConfig(w, req)
+	assert.Equal(t, http.StatusMethodNotAllowed, w.Code)
+
+	// reset 用 GET -> 405
+	req = httptest.NewRequest(http.MethodGet, "/_slowlog/reset", nil)
+	w = httptest.NewRecorder()
+	s.handleSlowLogReset(w, req)
+	assert.Equal(t, http.StatusMethodNotAllowed, w.Code)
+}
+
+func TestSlowLog_Middleware_SlowRequest(t *testing.T) {
+	s := newObsTestServer(t)
+	ResetSlowStats()
+	// 设置极低阈值, 让任何请求都算"慢"
+	SetSlowThreshold(1)
+
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(5 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	})
+	h := s.withSlowLog(inner)
+	req := httptest.NewRequest(http.MethodGet, "/test/slow", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	stats := SlowStats()
+	assert.True(t, stats.SlowCount >= 1, "应至少记录 1 条慢请求")
+}
+
+func TestSlowLog_Middleware_5xxResponse(t *testing.T) {
+	s := newObsTestServer(t)
+	ResetSlowStats()
+	// 确保 Log5xx 打开
+	SetSlowLog5xx(true)
+	// 设置一个很大的阈值, 避免触发"慢请求"条件(只验证 5xx 分支)
+	SetSlowThreshold(60000)
+
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"error":"boom"}`)
+	})
+	h := s.withSlowLog(inner)
+	req := httptest.NewRequest(http.MethodPost, "/idx/_doc/1", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+	stats := SlowStats()
+	assert.EqualValues(t, 1, stats.Error5xxCount, "5xx 响应应计数 1")
+	assert.EqualValues(t, 0, stats.SlowCount, "阈值很大, 不应触发慢请求计数")
+}
+
+func TestSlowLog_Middleware_5xx_Disabled(t *testing.T) {
+	s := newObsTestServer(t)
+	ResetSlowStats()
+	// 关闭 Log5xx
+	SetSlowLog5xx(false)
+	SetSlowThreshold(60000)
+
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+	h := s.withSlowLog(inner)
+	req := httptest.NewRequest(http.MethodGet, "/some/path", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	stats := SlowStats()
+	assert.EqualValues(t, 0, stats.Error5xxCount, "Log5xx=false 时不应记录 5xx")
+}
+
+func TestSlowLog_Middleware_NormalFastRequest(t *testing.T) {
+	s := newObsTestServer(t)
+	ResetSlowStats()
+	// 默认阈值 500ms, 快请求不触发慢请求; Log5xx=true 但 200 不触发 5xx
+	SetSlowThreshold(500)
+	SetSlowLog5xx(true)
+
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	})
+	h := s.withSlowLog(inner)
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	stats := SlowStats()
+	assert.EqualValues(t, 0, stats.SlowCount, "快请求不触发慢请求")
+	assert.EqualValues(t, 0, stats.Error5xxCount, "200 不触发 5xx")
+}
+
+func TestSlowLog_Middleware_4xxNot5xx(t *testing.T) {
+	s := newObsTestServer(t)
+	ResetSlowStats()
+	SetSlowThreshold(60000)
+	SetSlowLog5xx(true)
+
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+	})
+	h := s.withSlowLog(inner)
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	stats := SlowStats()
+	assert.EqualValues(t, 0, stats.Error5xxCount, "4xx 不应被计为 5xx")
+}
+
+// 确保 slowLogResponseWriter 在 Write 没显式 WriteHeader 时默认 200
+func TestSlowLog_ResponseWriter_Write_Default200(t *testing.T) {
+	rec := httptest.NewRecorder()
+	sw := &slowLogResponseWriter{ResponseWriter: rec, status: http.StatusOK}
+	_, _ = sw.Write([]byte("hi"))
+	assert.Equal(t, http.StatusOK, sw.status)
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// 确保 Stats 端点返回新增字段: error_5xx_count / last_error_5xx_time / log_5xx
+func TestSlowLog_StatsEndpoint_InclNewFields(t *testing.T) {
+	s := newObsTestServer(t)
+	ResetSlowStats()
+	SetSlowLog5xx(true)
+	RecordError5xx()
+	RecordSlowRequest(1000)
+
+	req := httptest.NewRequest(http.MethodGet, "/_slowlog/stats", nil)
+	w := httptest.NewRecorder()
+	s.handleSlowLogStats(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var body map[string]any
+	assert.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Contains(t, body, "error_5xx_count")
+	assert.Contains(t, body, "last_error_5xx_time")
+	assert.Contains(t, body, "log_5xx")
+	assert.EqualValues(t, 1, body["error_5xx_count"])
+	assert.Equal(t, true, body["log_5xx"])
 }
 
 // ---------- auditlog ----------

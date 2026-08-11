@@ -99,11 +99,17 @@ func main() {
 		if cfg.TLS.ClientAuth != nil {
 			*tlsClientAuth = *cfg.TLS.ClientAuth
 		}
-		// 热更新: 每 5s 轮询, 改动后仅刷新 auth/limit(其它启动时决定)
+		// 慢请求日志: 初始加载(支持热更新, 见 onChange)
+		server.ApplySlowLogConfig(cfg.SlowLog)
+		// 热更新: 每 5s 轮询, 改动后仅刷新 auth/limit/slowlog(其它启动时决定)
 		loader.SetOnChange(func(old, new *server.ConfigFile) {
+			// 热更新慢请求日志配置(可随时改阈值或 5xx 开关)
+			server.ApplySlowLogConfig(new.SlowLog)
 			logger.Info("config reloaded",
 				zap.String("path", *configPath),
-				zap.Bool("auth_enabled", new.Auth.Enabled))
+				zap.Bool("auth_enabled", new.Auth.Enabled),
+				zap.Int64("slowlog_threshold_ms", server.GetSlowThreshold()),
+				zap.Bool("slowlog_log_5xx", server.GetSlowLog5xx()))
 		})
 		go loader.Watch()
 		defer loader.Stop()

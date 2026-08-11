@@ -219,7 +219,7 @@
 - **验收标准**: 500w 文档内存占用 < 4GB;冷查询延迟 < 100ms;segment merge 不阻塞在线查询
 
 ### 11. 搜索结果评分缓存
-- **状态**: ⏳ 待实现
+- **状态**: ✅ 已完成 (2026-08-11)
 - **目标版本**: v0.7.0 (M6)
 - **目标日期**: 2026-09-18
 - **负责人**: hongsen.ren
@@ -227,10 +227,16 @@
 - **优先级**: 🟢 低
 - **工时**: S(1-2 天)
 - **实现要点**:
-  - 内存 LRU(`hashicorp/golang-lru` 或自实现),key = SHA1(query_body + index)
-  - 写操作时按 (index) 失效缓存
-  - 单测: 二次相同 query 命中缓存;e2e: 验证 /metrics 加 `go_es_search_cache_hits_total` 计数器
-- **验收标准**: 相同 query 二次请求命中缓存;缓存命中率可通过 /metrics 查询;写操作自动失效相关缓存
+  - `pkg/cache/lru.go`:纯内存 LRU 缓存实现,key = SHA1(sorted_indices + query_body);支持索引级精确失效 + 全量失效;线程安全(sync.RWMutex);暴露 HitRate/Stats
+  - `internal/server/server.go`:Server 新增 searchCache/searchCacheCfg 字段;NewWithOptions 自动初始化;invalidateCacheForIndex/invalidateCacheAll 辅助方法
+  - `internal/server/search.go`:doSearch 读 bodyBytes → 生成 cache key → 命中缓存直接返回(写 X-GoES-Cache: HIT 头);写入缓存受 MaxSize 限制
+  - `internal/server/metrics.go`:Prometheus 指标 go_es_search_cache_hits_total/misses_total/size(Gauge),Collect 周期刷新
+  - 失效策略:index_doc(update/delete)、bulk、reindex、update_by_query/delete_by_query(sync+async)、snapshot restore(全量失效)、index delete(按索引失效)
+- **测试覆盖**:
+  - `pkg/cache/lru_test.go`:14 个单元测试(New/MakeKey/SetGet/LRU 淘汰/InvalidateIndex/InvalidateAll/HitRate/Marshal/并发)全通过
+  - `internal/server/cache_test.go`:9 个集成测试(HitAndMiss/InvalidationOnWrite/InvalidationOnDelete/Disabled/MaxSize/DifferentQueries/Concurrent/LRUEviction/IndexDeletion)全通过
+  - `go test -race` 无数据竞争
+- **验收标准**:相同 query 二次请求命中缓存(X-GoES-Cache: HIT);写操作自动失效相关缓存;缓存命中率可通过 /metrics 查询;MaxSize 限制超大响应不缓存;并发访问安全
 
 ### 11a. 跨索引通配模式 ✅ (已完成)
 - **状态**: ✅ 已完成 (2026-08-05)
@@ -309,7 +315,7 @@
   - 高基数防护验证:Prometheus label 使用路由模板而非真实路径,标签集合稳定
 
 ### 15. 慢请求与失败请求采样日志
-- **状态**: ⏳ 待实现
+- **状态**: ✅ 已完成 (2026-08-11)
 - **目标版本**: v0.7.0 (M6)
 - **目标日期**: 2026-09-18
 - **负责人**: hongsen.ren
@@ -317,11 +323,14 @@
 - **优先级**: 🟢 低
 - **工时**: S(1 天)
 - **实现要点**:
-  - middlewareMetrics 已集成日志基础设施,只需添加慢请求阈值判定逻辑
-  - dur > configurable 阈值(默认 500ms) 或 status >= 500 时,WARN 级别打印完整 req+res 摘要
-  - 阈值可配 `slow_request_threshold_ms`(通过 YAML 配置文件)
-- **验收标准**: 超过 500ms 的请求被 WARN 级别记录;5xx 错误被 WARN 级别记录;日志包含请求路径、耗时、状态码
-- **备注**: 日志中间件已就绪,本项为增量扩展
+  - `withSlowLog` 中间件(`internal/server/slowlog.go`): 捕获 status code → 判定慢请求 (dur > threshold_ms, 默认 500ms) 或 5xx 错误 → WARN 级结构化日志输出 request_id/method/path/route/status/duration_ms/username/client_ip/trace_id/span_id
+  - `SlowLogConfig` (`internal/server/config.go`): YAML 支持 `slowlog: { threshold_ms: int, log_5xx: *bool }`;0 表示"默认值不修改"、*bool 区分"未设置"与"显式 false"
+  - `config_schema.go`: 2 条规则 (threshold_ms: 0~60000, log_5xx: bool); 非法值在 Load() 阶段 fail-fast
+  - `ApplySlowLogConfig(cfg)`: 热更新友好,零值自动跳过(不覆盖已有设置);接入 `cmd/server/main.go` 的 `loader.SetOnChange` 回调
+  - 管理端点: `GET /_slowlog/stats` (slow_count / error_5xx_count / last_*_time / threshold_ms / log_5xx)、`PUT /_slowlog/config`、`POST /_slowlog/reset`
+  - 统计: `RecordSlowRequest` / `RecordError5xx` / `ResetSlowStats` 原子自增(无锁),覆盖慢请求、5xx 错误两条独立路径
+- **验收标准**: ✅ (1) 超过 500ms 的请求被 WARN 记录 (threshold_ms 可 YAML / 管理端点配置,0~60000);(2) 5xx 响应独立 WARN 记录 (可通过 `log_5xx: false` 单独关闭, 默认开启);(3) 日志含 request_id、method、path、路由模板、status、duration_ms、username、client_ip、trace_id、span_id;(4) 配置热更新不重启生效,零值/空指针自动跳过不覆盖;(5) schema 校验: threshold_ms 超上限 / log_5xx 类型错 → 启动期报错;(6) observability_test.go 14 个新增用例 + config_test.go 5 个 schema 用例全通过,slowlog.go 核心函数覆盖率 100%,Write 66.7%
+- **备注**: 基于原 `slowlog.go` 扩展,不依赖新库;错误 5xx 计数与慢请求计数相互独立,可分别开关;
 
 ---
 

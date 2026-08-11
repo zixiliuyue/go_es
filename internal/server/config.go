@@ -27,20 +27,29 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// SlowLogConfig 慢请求日志配置(支持 YAML 热更新)
+type SlowLogConfig struct {
+	// ThresholdMs 慢请求阈值(毫秒), 超过该耗时的请求记为慢请求, 默认 500ms
+	ThresholdMs int64 `yaml:"threshold_ms"`
+	// Log5xx 是否对 5xx 响应独立输出 WARN 日志, 默认 true
+	Log5xx *bool `yaml:"log_5xx,omitempty"`
+}
+
 // ConfigFile 配置文件结构
 type ConfigFile struct {
-	Addr    string         `yaml:"addr"`
-	Data    string         `yaml:"data"`
-	Auth    AuthConfig     `yaml:"auth"`
-	Limit   LimitConfig    `yaml:"limit"`
-	TLS     TLSConfig      `yaml:"tls"`
-	Session SessionConfig  `yaml:"session"`
-	Tracing TracingConfig  `yaml:"tracing"`
+	Addr      string         `yaml:"addr"`
+	Data      string         `yaml:"data"`
+	Auth      AuthConfig     `yaml:"auth"`
+	Limit     LimitConfig    `yaml:"limit"`
+	TLS       TLSConfig      `yaml:"tls"`
+	Session   SessionConfig  `yaml:"session"`
+	Tracing   TracingConfig  `yaml:"tracing"`
+	SlowLog   SlowLogConfig  `yaml:"slowlog"`
 	RemoteWrite RemoteWriteConfig `yaml:"remote_write"`
 	OTelExport OTelExportConfig `yaml:"otel_export"`
-	Log     string         `yaml:"log_level"`
-	Watch   time.Duration  `yaml:"watch_interval"`
-	Extra   map[string]any `yaml:"extra,omitempty"`
+	Log       string         `yaml:"log_level"`
+	Watch     time.Duration  `yaml:"watch_interval"`
+	Extra     map[string]any `yaml:"extra,omitempty"`
 }
 
 // TLSConfig TLS 监听配置.

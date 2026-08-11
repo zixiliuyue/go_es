@@ -4,6 +4,7 @@ package server
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -439,4 +440,113 @@ func TestSchema_SanityCheckBadPort(t *testing.T) {
 	err := SanityCheck(cfg)
 	// 缺冒号先被 net.SplitHostPort 抓到
 	assert.Error(t, err)
+}
+
+// ---------- #15 新增: slowlog schema 规则 ----------
+
+// 23) slowlog.threshold_ms 合法值(0 默认)通过
+func TestSchema_SlowLog_ThresholdValid(t *testing.T) {
+	yaml := `addr: ":9200"
+slowlog:
+  threshold_ms: 0
+`
+	_, err := writeCfg(t, yaml)
+	assert.NoError(t, err, "threshold_ms=0 表示默认, 应通过")
+
+	yaml = `addr: ":9200"
+slowlog:
+  threshold_ms: 1000
+`
+	_, err = writeCfg(t, yaml)
+	assert.NoError(t, err, "threshold_ms=1000 应通过")
+
+	yaml = `addr: ":9200"
+slowlog:
+  threshold_ms: 60000
+`
+	_, err = writeCfg(t, yaml)
+	assert.NoError(t, err, "threshold_ms=60000(上限) 应通过")
+}
+
+// 24) slowlog.threshold_ms 超出上限报错
+func TestSchema_SlowLog_ThresholdOverLimit(t *testing.T) {
+	yaml := `addr: ":9200"
+slowlog:
+  threshold_ms: 60001
+`
+	_, err := writeCfg(t, yaml)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "slowlog.threshold_ms", "错误路径应指向 slowlog.threshold_ms")
+	assert.Contains(t, err.Error(), "60000", "应提示上限 60000")
+}
+
+// 25) slowlog.log_5xx true/false 合法
+func TestSchema_SlowLog_Log5xxBoolValid(t *testing.T) {
+	yaml := `addr: ":9200"
+slowlog:
+  log_5xx: true
+`
+	_, err := writeCfg(t, yaml)
+	assert.NoError(t, err, "log_5xx=true 应通过")
+
+	yaml = `addr: ":9200"
+slowlog:
+  log_5xx: false
+`
+	_, err = writeCfg(t, yaml)
+	assert.NoError(t, err, "log_5xx=false 应通过(显式 false 合法, 非 nil 跳过)")
+}
+
+// 26) slowlog.log_5xx 类型不匹配(填了字符串)报错
+func TestSchema_SlowLog_Log5xxTypeMismatch(t *testing.T) {
+	// 注意: YAML 1.1 把 yes/no/on/off/true/false 自动解析为 bool
+	// 这里用 yaml.v3 明确会解析为字符串的内容, 使 *bool 收到非 bool 原始值后触发
+	// 类型规则校验: 我们通过 yaml.v3 的 Strict(false) 行为, 当 struct 是 *bool 而
+	// YAML 值是数字时, 解析会出错, 因此这里用 123 触发 yaml parse 错误更直接
+	yaml := `addr: ":9200"
+slowlog:
+  log_5xx: 123
+`
+	_, err := writeCfg(t, yaml)
+	assert.Error(t, err)
+	// 要么是 yaml 解析阶段报了类型错误, 要么是 schema 抓到 log_5xx 异常
+	msg := err.Error()
+	assert.True(t,
+		strings.Contains(msg, "slowlog.log_5xx") || strings.Contains(msg, "yaml:") ||
+			strings.Contains(msg, "unmarshal") || strings.Contains(msg, "type"),
+		"应报告 log_5xx 或 yaml 类型错, 实际: %s", msg)
+}
+
+// 27) slowlog 完整配置 + tracing/session 共存应通过(回归)
+func TestSchema_SlowLog_FullBlockValid(t *testing.T) {
+	yaml := `addr: ":9200"
+data: "./data"
+auth:
+  enabled: true
+  basic:
+    admin: "secret"
+slowlog:
+  threshold_ms: 250
+  log_5xx: true
+tracing:
+  enabled: true
+  service_name: "go_es_test"
+  service_version: "v0.7.0"
+  propagation: "both"
+  sampling_rate: 1.0
+log_level: "info"
+watch_interval: 10s
+`
+	// 先写文件, 通过 writeCfg 做 schema 校验
+	dir := t.TempDir()
+	path := filepath.Join(dir, "go_es.yaml")
+	assert.NoError(t, os.WriteFile(path, []byte(yaml), 0644))
+	l := NewConfigLoader(path)
+	assert.NoError(t, l.Load(), "slowlog + tracing + session 同配置应通过")
+
+	// 再检查 SlowLog 字段值
+	cfg := l.Get()
+	assert.EqualValues(t, 250, cfg.SlowLog.ThresholdMs, "threshold_ms 应读到 250")
+	assert.NotNil(t, cfg.SlowLog.Log5xx, "log_5xx 应为非 nil *bool")
+	assert.True(t, *cfg.SlowLog.Log5xx, "log_5xx 应等于 true")
 }

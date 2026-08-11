@@ -329,6 +329,21 @@ func DefaultConfigSchema() *ConfigSchema {
 				Path: "tracing.sampling_rate", Kind: KindRange, Min: ptrF(0), Max: ptrF(1.0),
 				Message: "tracing.sampling_rate 应在 0.0 ~ 1.0 之间",
 			},
+
+			// ---------- slowlog.threshold_ms ----------
+			{
+				Path: "slowlog.threshold_ms", Kind: KindType, Type: TypeInt,
+				Message: "slowlog.threshold_ms 必须是整数(毫秒)",
+			},
+			{
+				Path: "slowlog.threshold_ms", Kind: KindRange, Min: ptrF(0), Max: ptrF(60000),
+				Message: "slowlog.threshold_ms 应在 0 ~ 60000 (60秒) 之间, 0 表示使用默认 500ms",
+			},
+			// ---------- slowlog.log_5xx ----------
+			{
+				Path: "slowlog.log_5xx", Kind: KindType, Type: TypeBool,
+				Message: "slowlog.log_5xx 必须是布尔值(true/false, 默认 true)",
+			},
 		},
 	}
 }
@@ -535,6 +550,12 @@ func lookupField(path string, cfg *ConfigFile) any {
 		return cfg.Tracing.Propagation
 	case "tracing.sampling_rate":
 		return cfg.Tracing.SamplingRate
+	case "slowlog.threshold_ms":
+		return cfg.SlowLog.ThresholdMs
+	case "slowlog.log_5xx":
+		// 返回 *bool 指针, 区分 "未设置(nil)" 与 "显式 true/false"
+		// isZero 把 *bool nil 视为零, 非 nil 视为非零
+		return cfg.SlowLog.Log5xx
 	case "log_level":
 		return cfg.Log
 	case "watch_interval":
