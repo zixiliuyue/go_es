@@ -500,17 +500,26 @@
 - **验收标准**: 请求链路包含 traceparent 头;X-Request-Id 在日志中贯穿全链路;trace_id/span_id 出现在 access/audit/slow 日志中;服务间透传测试全通过
 
 ### 24. SDK 集成测试 fixture
-- **状态**: ⏳ 待实现
+- **状态**: ✅ 已完成 (2026-09-10)
 - **目标版本**: v0.7.0 (M6)
-- **目标日期**: 2026-09-18
 - **负责人**: hongsen.ren
 - **价值**: `pkg/pool` 等测试需要真 ES,本地失败是预期。提供 in-process test container
 - **优先级**: 🟢 低
-- **工时**: S(1 天)
-- **实现要点**:
-  - 在 `pkg/client` 加 `NewTestServer(t)` helper,起内存 BadgerDB + server,自动 cleanup
-  - 改 `pkg/pool` 等用 TestServer 代替 skip
-- **验收标准**: `pkg/pool` 等测试不再需要 skip;TestServer fixture 可复用于所有 SDK 测试
+- **工时**: S(1 天) → 实际 0.5 天
+- **实现要点**(实际交付):
+  - `pkg/client/testserver.go` `TestServer` 结构体 + `NewTestServer(t)` / `NewTestServerWithOptions(t, opts)`:
+    - 内存 BadgerDB(`storage.Open("")` 触发 `WithInMemory(true)`) + `search.New(store)` + `server.NewWithOptions(store, engine, logger, opts)` + `httptest.NewServer(srv.Handler())`
+    - `t.Cleanup` 自动关闭(顺序: HTTP → Server.Shutdown → store.Close), 幂等 `Close()`
+    - 暴露 `URL()` / `Addr()` / `Server` / `Store` / `Engine` 字段供测试直接访问
+    - `TestServerOptions{Auth, Limit, Logger, StartupDone}` 支持自定义认证/限流/日志
+    - `NewClientForTest(t, ts)` 便捷函数: 基于 TestServer 创建已连接好的 `*Client`(默认禁用 retry, 启用 breaker)
+  - `pkg/pool/pool_test.go` 改造: 用 `client.NewTestServer(t)` 替代 `localhost:9200`, 去掉所有 skip 逻辑; 新增 `TestPool_GetReturnsHealthyClient` / `TestPool_WeightedRoundRobin` 真实端到端验证
+  - `pkg/client/testserver_test.go` 14 个测试: 生命周期 / 多实例 / Close 幂等 / nil 安全 / NewClientForTest 端到端 / IndexDoc+Search / DeleteDoc / Bulk / ClusterHealth / Liveness / Metrics / Shutdown→readiness 503
+  - 注意: 不使用 `t.Parallel()`, 因 `internal/search.SetSourceLookup` 和 `internal/server.SetGlobalTracerProvider` 写全局变量(internal 包既有设计), 并行构造多个 TestServer 会触发 -race
+- **验收标准**:
+  - ✅ `pkg/pool` 测试不再需要 skip, 全部 7 个测试通过
+  - ✅ TestServer fixture 可复用于所有 SDK 测试(pkg/client + pkg/pool 已验证)
+  - ✅ `go test -race ./pkg/client/ ./pkg/pool/` 全通过, pkg/client 覆盖率 **90.5% ≥ 80%**
 
 ---
 
