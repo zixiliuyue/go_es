@@ -206,6 +206,8 @@ func (s *Server) applyWrite(op writeOp) (DocMeta, int, map[string]interface{}) {
 	}
 	// 推 inverted
 	s.engine.IndexDoc(op.Index, op.ID, op.Doc)
+	// 失效搜索缓存: 按索引级精确失效 (#11)
+	s.invalidateCacheForIndex(op.Index)
 	// segment 触发检查
 	if s.seg != nil {
 		docSize := docSizeOf(op.Doc)

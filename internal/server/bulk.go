@@ -193,6 +193,17 @@ func (s *Server) handleBulk(w http.ResponseWriter, r *http.Request) {
 	// 加上 parse 错误的
 	resp.Items = append(errItems, resp.Items...)
 
+	// 失效缓存 (#11): 按涉及的索引逐个失效
+	seen := make(map[string]struct{})
+	for _, p := range pendings {
+		if p.index != "" {
+			seen[p.index] = struct{}{}
+		}
+	}
+	for idx := range seen {
+		s.invalidateCacheForIndex(idx)
+	}
+
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	resp.Took = int(time.Since(took).Milliseconds())
 	s.logger.Info("bulk handled", zap.Int("items", len(resp.Items)), zap.Bool("errors", resp.Errors))

@@ -53,6 +53,10 @@ type ServerMetrics struct {
 	// RBAC
 	rbacAuthFail  *prometheus.CounterVec
 	rbacForbidden *prometheus.CounterVec
+	// SearchCache (#11)
+	cacheHits   prometheus.Gauge
+	cacheMisses prometheus.Gauge
+	cacheSize   prometheus.Gauge
 
 	// inFlight 状态保护并发计数
 	inFlight sync.Map // map[inflightKey]*float64 -> gauge 指针
@@ -199,6 +203,20 @@ func NewServerMetrics() *ServerMetrics {
 		Help: "Total forbidden accesses.",
 	}, []string{"action", "index"})
 
+	// SearchCache (#11)
+	m.cacheHits = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "go_es", Name: "search_cache_hits_total",
+		Help: "Total number of search cache hits.",
+	})
+	m.cacheMisses = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "go_es", Name: "search_cache_misses_total",
+		Help: "Total number of search cache misses.",
+	})
+	m.cacheSize = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "go_es", Name: "search_cache_size",
+		Help: "Current number of entries in the search cache.",
+	})
+
 	reg.MustRegister(
 		m.httpRequestsTotal,
 		m.httpRequestDuration,
@@ -212,6 +230,7 @@ func NewServerMetrics() *ServerMetrics {
 		m.segTotalSegments, m.segTotalFlushes, m.segTotalBytes,
 		m.ocConflicts,
 		m.rbacAuthFail, m.rbacForbidden,
+		m.cacheHits, m.cacheMisses, m.cacheSize,
 	)
 	// 预热 label, 让无样本的指标也能在 /metrics 出现
 	m.wcTotalBatches.WithLabelValues("ok")
@@ -260,6 +279,15 @@ func (m *ServerMetrics) Collect(s *Server) {
 		m.segTotalSegments.Set(float64(stats.TotalSegments))
 		m.segTotalFlushes.Set(float64(stats.TotalFlushes))
 		m.segTotalBytes.Set(float64(stats.TotalBytes))
+	}
+	// SearchCache (#11)
+	if s.searchCache != nil {
+		stats := s.searchCache.Stats()
+		m.cacheHits.Set(float64(stats.Hits))
+		m.cacheMisses.Set(float64(stats.Misses))
+		m.cacheSize.Set(float64(stats.Size))
+	} else {
+		m.cacheSize.Set(0)
 	}
 	// Index doc count
 	if s.engine != nil {

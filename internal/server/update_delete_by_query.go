@@ -115,6 +115,8 @@ func (s *Server) doDeleteByQuerySync(index string, q *search.Query) map[string]i
 		s.engine.DeleteDoc(index, id)
 		deleted++
 	}
+	// 失效搜索缓存 (#11)
+	s.invalidateCacheForIndex(index)
 	return map[string]interface{}{
 		"took":      0,
 		"timed_out": false,
@@ -162,6 +164,8 @@ func (s *Server) runDeleteByQuery(index string, q *search.Query, e *taskEntry) {
 		e.withInfo(func(info *TaskInfo) { info.Status = TaskStatusCancelled })
 		return
 	}
+	// 失效搜索缓存 (#11)
+	s.invalidateCacheForIndex(index)
 	// 收集最终进度 + 写 Response
 	var total, deleted, batches int64
 	e.withInfo(func(info *TaskInfo) {
@@ -210,6 +214,8 @@ func (s *Server) doUpdateByQuerySync(index string, q *search.Query, fn updateScr
 		s.engine.IndexDoc(index, id, newSrc)
 		updated++
 	}
+	// 失效搜索缓存 (#11)
+	s.invalidateCacheForIndex(index)
 	return map[string]interface{}{
 		"took":      0,
 		"timed_out": false,
@@ -265,6 +271,8 @@ func (s *Server) runUpdateByQuery(index string, q *search.Query, fn updateScript
 		e.withInfo(func(info *TaskInfo) { info.Status = TaskStatusCancelled })
 		return
 	}
+	// 失效搜索缓存 (#11)
+	s.invalidateCacheForIndex(index)
 	var total, updated, batches int64
 	e.withInfo(func(info *TaskInfo) {
 		total = info.Progress.Total

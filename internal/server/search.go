@@ -2,13 +2,17 @@
 package server
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	stdSort "sort"
 	"strings"
 	"time"
 
 	"github.com/zixiliuyue/go_es/internal/search"
+	"github.com/zixiliuyue/go_es/pkg/cache"
 )
 
 // handleSearchAll POST /_search
@@ -39,9 +43,23 @@ func (s *Server) handleSearchForNamePattern(w http.ResponseWriter, r *http.Reque
 
 // doSearch 实际搜索逻辑
 func (s *Server) doSearch(w http.ResponseWriter, r *http.Request, indices []string) {
-	var req searchRequest
+	// 读取请求体并保留 (用于缓存 key 生成 + 重放 decodeJSON)
+	var bodyBytes []byte
 	if r.ContentLength > 0 {
-		if err := decodeJSON(r, &req); err != nil {
+		buf, err := io.ReadAll(r.Body)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "parse_exception", err.Error(), "")
+			return
+		}
+		bodyBytes = buf
+		r.Body = io.NopCloser(bytes.NewReader(buf))
+	}
+
+	var req searchRequest
+	if len(bodyBytes) > 0 {
+		dec := json.NewDecoder(bytes.NewReader(bodyBytes))
+		dec.UseNumber()
+		if err := dec.Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "parse_exception", err.Error(), "")
 			return
 		}
@@ -52,6 +70,18 @@ func (s *Server) doSearch(w http.ResponseWriter, r *http.Request, indices []stri
 	if len(indices) == 0 {
 		writeJSON(w, http.StatusOK, buildEmptyResponse(req))
 		return
+	}
+
+	// 缓存命中检查 (#11): 仅在缓存启用时走缓存
+	if s.searchCache != nil {
+		key := cache.MakeKey(indices, bodyBytes)
+		if val, hit := s.searchCache.Get(key); hit {
+			w.Header().Set("X-GoES-Cache", "HIT")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(val)
+			return
+		}
 	}
 
 	q, err := parseQuery(req.Query)
@@ -187,6 +217,15 @@ func (s *Server) doSearch(w http.ResponseWriter, r *http.Request, indices []stri
 			resp["suggest"] = merged
 		}
 	}
+
+	// 写入缓存 (#11): 仅在缓存启用且响应大小 <= MaxSize 时缓存
+	if s.searchCache != nil {
+		key := cache.MakeKey(indices, bodyBytes)
+		if buf, err := json.Marshal(resp); err == nil && len(buf) <= s.searchCacheCfg.MaxSize {
+			s.searchCache.Set(key, buf, indices)
+		}
+	}
+
 	writeJSON(w, http.StatusOK, resp)
 }
 

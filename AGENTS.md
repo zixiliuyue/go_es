@@ -413,8 +413,18 @@ watch_interval: 5s          # 轮询间隔(go duration)
   - 单元测试:`multimatch_test.go` 19 个用例全通过,`go test -race` 无竞争
   - e2e:`scripts/e2e-tests.sh` sections 24-26 覆盖 multi_match/query_string/simple_query_string
 
+- 2026-08-11: 完成 #11 搜索结果评分缓存(交付 v0.7.0 M6):
+  - `pkg/cache/lru.go`:纯内存 LRU 缓存(capacity 可配),key = SHA1(sorted_indices + query_body);支持 Set/Get/InvalidateIndex/InvalidateAll/Stats/HitRate;双向链表维护访问顺序;线程安全 sync.RWMutex
+  - `internal/server/server.go`:Server 新增 searchCache + searchCacheCfg 字段;SearchCacheConfig{Enabled,Capacity,MaxSize};invalidateCacheForIndex/invalidateCacheAll 辅助方法
+  - `internal/server/search.go`:doSearch 读 bodyBytes → 生成 cache key → 命中缓存直接返回(X-GoES-Cache: HIT);响应写入缓存受 MaxSize 限制;Cache Key 用排序后的索引列表 + query_body SHA1 生成
+  - `internal/server/metrics.go`:Prometheus 指标 go_es_search_cache_hits_total/misses_total/size(Gauge),Collect 周期刷新
+  - 失效策略:index_doc(PUT/DELETE)、bulk、reindex、update_by_query/delete_by_query(sync+async)、snapshot restore(全量失效)、index delete(按索引失效)
+  - 单元测试:`pkg/cache/lru_test.go` 14 个(LRU 核心逻辑);`internal/server/cache_test.go` 9 个(集成:HitAndMiss/InvalidationOnWrite/InvalidationOnDelete/Disabled/MaxSize/DifferentQueries/Concurrent/LRUEviction/IndexDeletion)
+  - `go test -race` 无数据竞争
+
 ### 已实现完整覆盖
 - **搜索 DSL 完整覆盖**:match/multi_match/query_string/simple_query_string/term/terms/range/bool/match_all/match_phrase
+- **搜索结果评分缓存**(#11):LRU 内存缓存 + 索引级精确失效 + 全量失效 + MaxSize 限制 + Prometheus metrics
 - HTTP/2 (h2c + h2)
 - TLS / h2
 - mTLS(双向证书认证)

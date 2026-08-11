@@ -369,6 +369,9 @@ func (s *Server) doReindexSync(srcIdx, dest string) map[string]interface{} {
 		s.engine.IndexDoc(dest, id, src)
 		created++
 	}
+	// 失效源索引和目标索引的缓存 (#11)
+	s.invalidateCacheForIndex(srcIdx)
+	s.invalidateCacheForIndex(dest)
 	return map[string]interface{}{
 		"took":      0,
 		"timed_out": false,
@@ -443,6 +446,9 @@ func (s *Server) runReindex(srcIdx, dest string, e *taskEntry) {
 		return
 	}
 	e.withInfo(func(info *TaskInfo) { info.Status = TaskStatusCompleted })
+	// 失效源索引和目标索引的缓存 (#11)
+	s.invalidateCacheForIndex(srcIdx)
+	s.invalidateCacheForIndex(dest)
 	// 提交前再检查一次, 避免 "循环完成 -> cancel 到达 -> 状态已置 completed" 的竞态
 	if e.cancelled.Load() {
 		cancelAfter()
@@ -684,6 +690,8 @@ func (s *Server) handleSnapshotRestore(w http.ResponseWriter, r *http.Request) {
 			s.logger.Warn("restore: rebuild inverted failed", zap.Error(err))
 		}
 	}
+	// 失效全部搜索缓存 (#11): 恢复可能涉及多个索引
+	s.invalidateCacheAll()
 	// 验证完整性
 	if expectedDocCount > 0 && restoredDocs != expectedDocCount {
 		s.logger.Warn("restore: doc count mismatch",

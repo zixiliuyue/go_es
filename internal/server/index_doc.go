@@ -93,6 +93,8 @@ func (s *Server) handleIndexDeleteForName(w http.ResponseWriter, r *http.Request
 		return
 	}
 	_ = s.store.DeletePrefix(storage.DocPrefix(index))
+	// 失效搜索缓存 (#11): 仅失效被删除的索引
+	s.invalidateCacheForIndex(index)
 	// 清掉指向此 index 的别名
 	_ = s.store.Scan([]byte("alias/"), func(k, v []byte) error {
 		var list []string
@@ -395,6 +397,8 @@ func (s *Server) handleUpdateForName(w http.ResponseWriter, r *http.Request, ind
 		return
 	}
 	s.engine.IndexDoc(index, id, existing)
+	// 失效搜索缓存 (#11)
+	s.invalidateCacheForIndex(index)
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"_index":   index,
 		"_id":      id,
@@ -426,6 +430,8 @@ func (s *Server) handleDocDeleteForName(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	s.engine.DeleteDoc(index, id)
+	// 失效搜索缓存 (#11)
+	s.invalidateCacheForIndex(index)
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"_index":   index,
 		"_id":      id,

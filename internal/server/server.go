@@ -30,6 +30,7 @@ import (
 
 	"github.com/zixiliuyue/go_es/internal/search"
 	"github.com/zixiliuyue/go_es/internal/storage"
+	"github.com/zixiliuyue/go_es/pkg/cache"
 	"go.uber.org/zap"
 )
 
@@ -75,6 +76,9 @@ type Server struct {
 	remoteWriter *RemoteWriter
 	// OpenTelemetry 导出器
 	otelExporter *OTelExporter
+	// SearchCache 搜索结果 LRU 缓存 (#11)
+	searchCache     *cache.Cache
+	searchCacheCfg  SearchCacheConfig
 }
 
 // ServerOptions 构造服务端的可选配置
@@ -93,6 +97,29 @@ type ServerOptions struct {
 	RemoteWrite RemoteWriteConfig
 	// OTelExport OpenTelemetry 导出配置
 	OTelExport OTelExportConfig
+	// SearchCache 搜索结果缓存配置
+	SearchCache SearchCacheConfig
+}
+
+// SearchCacheConfig 搜索结果缓存配置
+//
+// 字段:
+//   - Enabled: 是否启用缓存 (默认 true)
+//   - Capacity: 最大缓存条目数 (默认 1000)
+//   - MaxSize: 单条缓存响应最大字节数 (默认 64KB, 超过不缓存)
+type SearchCacheConfig struct {
+	Enabled  bool
+	Capacity int
+	MaxSize  int
+}
+
+// DefaultSearchCacheConfig 返回默认搜索缓存配置
+func DefaultSearchCacheConfig() SearchCacheConfig {
+	return SearchCacheConfig{
+		Enabled:  true,
+		Capacity: 1000,
+		MaxSize:  64 << 10, // 64KB
+	}
 }
 
 // New 创建一个新的服务端
@@ -170,6 +197,27 @@ func NewWithOptions(store *storage.Store, engine *search.Engine, logger *zap.Log
 		MaxBufferBytes:       64 << 20,
 		AutoFlushIntervalSec: 30,
 	}, store, engine)
+	// SearchCache 初始化 (#11)
+	cacheCfg := opts.SearchCache
+	if !cacheCfg.Enabled {
+		cacheCfg = DefaultSearchCacheConfig()
+		cacheCfg.Enabled = false
+	}
+	if cacheCfg.Capacity <= 0 {
+		cacheCfg.Capacity = 1000
+	}
+	if cacheCfg.MaxSize <= 0 {
+		cacheCfg.MaxSize = 64 << 10
+	}
+	s.searchCacheCfg = cacheCfg
+	if cacheCfg.Enabled {
+		s.searchCache = cache.New(cacheCfg.Capacity)
+		logger.Info("search cache initialized",
+			zap.Int("capacity", cacheCfg.Capacity),
+			zap.Int("max_size", cacheCfg.MaxSize))
+	} else {
+		logger.Info("search cache disabled")
+	}
 	// ILM 执行器初始化(默认 30s 扫描间隔)
 	s.ilmExecutor = NewILMExecutor(s, logger, 30*time.Second)
 	s.ilmExecutor.Start()
@@ -568,3 +616,24 @@ func (s *Server) RemoteWriter() *RemoteWriter { return s.remoteWriter }
 
 // OTelExporter 返回 OTel 导出器
 func (s *Server) OTelExporter() *OTelExporter { return s.otelExporter }
+
+// invalidateCacheForIndex 按索引名失效所有关联的搜索缓存条目 (#11)
+//
+// 调用时机: 文档写入/更新/删除、bulk 操作、reindex 完成后
+// 若缓存未启用或索引为空, 本函数为 no-op
+func (s *Server) invalidateCacheForIndex(index string) {
+	if s.searchCache == nil || index == "" {
+		return
+	}
+	s.searchCache.InvalidateIndex(index)
+}
+
+// invalidateCacheAll 失效全部搜索缓存条目 (#11)
+//
+// 调用时机: 索引删除等全局级变更
+func (s *Server) invalidateCacheAll() {
+	if s.searchCache == nil {
+		return
+	}
+	s.searchCache.InvalidateAll()
+}
