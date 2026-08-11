@@ -406,8 +406,15 @@ watch_interval: 5s          # 轮询间隔(go duration)
   - 单元测试:`extensions2_test.go` 新增 7 个 `TestUI_IndexPanel_*`:ListRows/CreateFlow/DeleteFlow/ViewModals/SidebarStructure/Integration/EmptyState,`go test -race` 全通过
   - e2e:`scripts/e2e-tests.sh` section 9i,40+ 条断言(JS hook + 真实 HTTP 端到端创建/删除/查询)
 
+- 2026-08-11: 完成 #6 multi_match / query_string / simple_query_string(交付 v0.3.0 M2):
+  - `internal/search/multimatch.go`:5 种 multi_match 类型(best_fields/most_fields/cross_fields/phrase/phrase_prefix)+ query_string mini Lucene parser + simple_query_string(剥离保留字符不报错)
+  - `internal/search/query.go`:Query 结构体已集成 MultiMatch/QueryString/SimpleQueryString 字段,Match() 方法自动分发
+  - 集合工具:intersectSets/unionSets/subtractSets
+  - 单元测试:`multimatch_test.go` 19 个用例全通过,`go test -race` 无竞争
+  - e2e:`scripts/e2e-tests.sh` sections 24-26 覆盖 multi_match/query_string/simple_query_string
+
 ### 已实现完整覆盖
-- 倒排索引查询引擎(range 已倒排化, term/match 原本就是倒排)
+- **搜索 DSL 完整覆盖**:match/multi_match/query_string/simple_query_string/term/terms/range/bool/match_all/match_phrase
 - HTTP/2 (h2c + h2)
 - TLS / h2
 - mTLS(双向证书认证)

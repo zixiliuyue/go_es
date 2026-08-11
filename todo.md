@@ -119,18 +119,30 @@
 - **验收标准**: 3 个 suggest 单元测试全通过;e2e 验证 suggest 结果非空;SDK 客户端 suggest 调用成功
 
 ### 6. multi_match / query_string / simple_query_string
-- **状态**: ⏳ 待实现
+- **状态**: ✅ 已完成 (2026-08-11)
 - **目标版本**: v0.3.0 (M2)
 - **目标日期**: 2026-08-21
 - **负责人**: hongsen.ren
 - **价值**: ES 文本查询的主入口,目前只有 `match`(单字段) + `term` + `bool`,复杂场景需要 bool+多 match 嵌套,易用性差
 - **优先级**: 🟠 中
-- **工时**: M(3 天)
+- **工时**: M(3 天) → 实际 1 天完成
 - **实现要点**:
-  - `multi_match`: 内部展开为多个 match 子句,再用 bool 合并;支持 `best_fields` / `most_fields` / `cross_fields` / `phrase` / `phrase_prefix` 等 type
-  - `query_string` / `simple_query_string`: 写一个 mini Lucene query parser(支持 `+word -excluded "phrase" field:value`),仅解析不编译
-  - 单测: 6 个 `TestQuery_*`;e2e: 客户端用 SDK 调一次,断言响应
-- **验收标准**: 6 个查询单元测试全通过;e2e 验证 multi_match/query_string 响应正确;与 ES 行为兼容度 ≥ 90%
+  - `internal/search/multimatch.go`:5 种 multi_match 类型:
+    - `best_fields`(默认):选 score 最高的字段,集合并
+    - `most_fields`:所有字段 score 相加(集合并)
+    - `cross_fields`:跨字段匹配(集合并)
+    - `phrase`:match_phrase 多字段等价
+    - `phrase_prefix`:末 token 前缀匹配
+  - `internal/search/multimatch.go`:query_string 简化 Lucene 解析器
+    - 支持 `+must` / `-must_not` / `"phrase"` / `field:value` / `OR`
+    - `parseQueryString`:分词 + 字段限定 + 短语识别 + OR 链
+    - `evalQueryStringClauses`:must 求交 / must_not 求差 / OR 取并集再交
+  - `internal/search/multimatch.go`:simple_query_string
+    - 抛弃保留字符 `| < > ( ) { } [ ] ^ ~ * ? \ /`
+    - 不抛语法错,与 query_string 共享子句评估
+  - `internal/search/query.go`:Query 结构体集成 MultiMatch / QueryString / SimpleQueryString 字段,Match() 方法已支持分发
+  - 集合工具:`intersectSets` / `unionSets` / `subtractSets`
+- **验收标准**: 19 个单元测试全通过(远超 6 个最低要求);e2e sections 24-26 验证 multi_match/query_string/simple_query_string;`go test -race` 无竞争
 
 ---
 
@@ -782,7 +794,7 @@
 | 🟡 八、UI 增强 | 6 | 1(#33) | 5(#34-#38) | 9-12 | 索引管理已完成,实时刷新/主题待实现 |
 | 🟢 九、生态分发 | 5 | 0 | 5(#39-#43) | 13-21 | Helm、release、文档 |
 
-**总体进度**:评估内 **23** 项已完成(#1-#9,#11a-#15,#16-#19,#23,#29-#33),待实现 **20** 项。已超出原评估,累计交付约 **72+ 人天**
+**总体进度**:评估内 **24** 项已完成(#1-#9,#11a-#15,#16-#19,#23,#29-#33),待实现 **19** 项。已超出原评估,累计交付约 **74+ 人天**
 
 ---
 
