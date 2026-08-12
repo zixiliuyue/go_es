@@ -33,6 +33,7 @@ package search
 
 import (
 	"fmt"
+	"path/filepath"
 	"sync"
 	"testing"
 
@@ -224,5 +225,99 @@ func benchmarkMatch(b *testing.B, N int, queryIdx int) {
 		// 写入全局 sink 防止被优化掉
 		sinkResults = r
 		sinkErr = err
+	}
+}
+
+// ------------------------------------------------------------------
+// 冷启动: LoadAll 快路径(snapshot) vs 慢路径(doc-tf) (#7)
+// ------------------------------------------------------------------
+
+// prepareColdStartStore 准备一个磁盘 store, 写入 N 条 doc + flush snapshot
+// 返回 store 路径 (benchmark 期间复用同一份磁盘数据)
+func prepareColdStartStore(b *testing.B, N int) string {
+	b.Helper()
+	dir := b.TempDir()
+	store, err := storage.Open(filepath.Join(dir, "data"))
+	if err != nil {
+		b.Fatalf("open store: %v", err)
+	}
+	e := New(store)
+	for i := 0; i < N; i++ {
+		title := fmt.Sprintf("title_%d hello world search elasticsearch benchmark", i%100)
+		content := fmt.Sprintf("content_%d the quick brown fox jumps over the lazy dog document_%d", i%50, i)
+		count := json.Number(fmt.Sprintf("%d", (i+1)*3%10000))
+		active := (i % 2) == 0
+		// 写 doc/ + doc-tf/ + 内存倒排
+		_ = store.Put(storage.DocKey("bench_idx", fmt.Sprintf("doc-%d", i)), map[string]interface{}{
+			"title":   title,
+			"content": content,
+			"count":   count,
+			"active":  active,
+		})
+		e.IndexDoc("bench_idx", fmt.Sprintf("doc-%d", i), map[string]interface{}{
+			"title":   title,
+			"content": content,
+			"count":   count,
+			"active":  active,
+		})
+	}
+	// flush postings snapshot
+	_, _, err = e.FlushPostingsSnapshot("bench_idx")
+	if err != nil {
+		b.Fatalf("flush snapshot: %v", err)
+	}
+	_ = store.Close()
+	return filepath.Join(dir, "data")
+}
+
+// BenchmarkColdStart_Snapshot_1k LoadAll 走 snapshot 快路径
+func BenchmarkColdStart_Snapshot_1k(b *testing.B)  { benchmarkColdStartSnapshot(b, 1000) }
+func BenchmarkColdStart_Snapshot_10k(b *testing.B) { benchmarkColdStartSnapshot(b, 10000) }
+
+func benchmarkColdStartSnapshot(b *testing.B, N int) {
+	b.StopTimer()
+	dataDir := prepareColdStartStore(b, N)
+	b.ResetTimer()
+	b.ReportAllocs()
+	for n := 0; n < b.N; n++ {
+		store, err := storage.Open(dataDir)
+		if err != nil {
+			b.Fatalf("open store: %v", err)
+		}
+		e := New(store)
+		b.StartTimer()
+		sinkErr = e.LoadAll()
+		b.StopTimer()
+		_ = store.Close()
+	}
+}
+
+// BenchmarkColdStart_DocTF_1k LoadAll 走 doc-tf 慢路径 (snapshot 失效后)
+func BenchmarkColdStart_DocTF_1k(b *testing.B)  { benchmarkColdStartDocTF(b, 1000) }
+func BenchmarkColdStart_DocTF_10k(b *testing.B) { benchmarkColdStartDocTF(b, 10000) }
+
+func benchmarkColdStartDocTF(b *testing.B, N int) {
+	b.StopTimer()
+	dataDir := prepareColdStartStore(b, N)
+	// 先失效 snapshot, 强制走 doc-tf 慢路径
+	store, err := storage.Open(dataDir)
+	if err != nil {
+		b.Fatalf("open store: %v", err)
+	}
+	e := New(store)
+	_ = e.InvalidatePostingsSnapshot("bench_idx")
+	_ = store.Close()
+	b.ResetTimer()
+	b.ReportAllocs()
+	for n := 0; n < b.N; n++ {
+		store, err := storage.Open(dataDir)
+		if err != nil {
+			b.Fatalf("open store: %v", err)
+		}
+		e := New(store)
+		b.StartTimer()
+		sinkErr = e.LoadAll()
+		b.StopTimer()
+		_ = store.Close()
 	}
 }

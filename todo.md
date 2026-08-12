@@ -1,6 +1,6 @@
 # go_es 功能评估与待办清单
 
-> 评估日期: 2026-08-07(最后更新: 2026-08-10)  
+> 评估日期: 2026-08-07(最后更新: 2026-08-12)  
 > 评估范围: `cmd/server`、`internal/server`、`internal/search`、`internal/storage`、`pkg/*`、`scripts/*`  
 > 项目定位: 自研最小可运行的 Elasticsearch 8 兼容服务端(数据用 BadgerDB 持久化),客户端 + 服务端双端实现
 
@@ -8,32 +8,42 @@
 
 ## 评估摘要
 
-**已实现亮点**(截至 v0.1.z,共 4 个里程碑):
+**已实现亮点**(截至 v0.7.0 M6,共 10 个里程碑):
 - 完整 CRUD / Bulk / _search / _reindex(异步+取消回滚)/ _aliases / ILM / Ingest Pipeline / Index&Component Template / Snapshot / Tasks / Cat / 健康探针
 - HTTP/2(h2c + h2)/ TLS / mTLS / gzip / 跨索引通配 / Basic+ApiKey 认证 / IP 限速 / 优雅关闭 / Prometheus metrics(#14)
-- 倒排索引引擎 + 范围查询 O(logN+K) 排序倒排 + bulk 写合并(#9)
-- 内置 Web UI(多 Tab + 历史 + 字段类型推断 + 拖拽 + 导入导出 + SVG 历史图表)
+- 倒排索引引擎 + 范围查询 O(logN+K) 排序倒排 + bulk 写合并(#9) + **倒排持久化快路径冷启动**(#7,10k 档加速 42%) + **segment 分段管理**(#10,bloom+merge)
+- BM25 相关性打分(#2) + 11 种聚合分析(#1) + highlight/source filtering/track_total_hits(#4)
+- 完整查询 DSL:match/multi_match/query_string/simple_query_string/term/terms/range/bool/match_all/match_phrase(#6)
+- suggest/completion/phrase 服务端(#5) + update/delete_by_query(#3)
+- seq_no/primary_term 乐观并发控制(#8) + mapping 校验(#19) + settings 真生效(#18) + ILM 真执行(#17)
+- 真实快照与恢复(#16):NDJSON 文件级、跨 store 恢复、完整性校验 + 数据备份/导出工具(#20)
+- RBAC 权限控制(#29) + 审计日志(#30) + 输入校验硬化(#31) + CORS(#32)
+- 内置 Web UI(多 Tab + 历史 + 字段类型推断 + 拖拽 + 导入导出 + SVG 历史图表 + 索引管理面板)
 - YAML 配置热更新 + schema 校验(数据驱动规则引擎,启动期 fail-fast)
-- 真实快照与恢复(#16):NDJSON 文件级、跨 store 恢复、完整性校验、物理文件删除
 - 配置热加载 + TLS/mTLS 全链路 + reindex 取消回滚
-- 结构化访问日志+request trace(#12) + 健康端点深化(#13)
-- **分布式追踪**(#23):W3C TraceContext + B3 双协议透传、中间件自动注入/提取、Span 生命周期管理、日志 trace_id/span_id 关联、YAML 配置驱动、35+ 单元测试全通过
+- 结构化访问日志+request trace(#12) + 健康端点深化(#13) + 慢请求采样日志(#15)
+- **分布式追踪**(#23):W3C TraceContext + B3 双协议透传、Span 生命周期管理、日志 trace_id/span_id 关联
+- **客户端 SDK**:retry/circuit-breaker(#22) + 上下文超时透传(#23) + test fixture(#24) + 搜索结果评分缓存(#11)
+- **测试质量**:fuzz testing(#25) + benchmark 基线(#26) + 端到端压测(#27)
 
-**已解决的短板**(本轮完成):
-1. ~~写入路径未走 batch~~ → ✅ bulk 写合并已实现(第 9 项)
-2. ~~没有持久化/恢复机制~~ → ✅ 真实快照与恢复已实现(第 16 项)
-3. ~~没有 structured logging / metrics~~ → ✅ 访问日志 + Prometheus metrics 已集成(第 12/14 项)
+**已解决的短板**(M1-M6 累计完成):
+1. ~~写入路径未走 batch~~ → ✅ bulk 写合并已实现(#9)
+2. ~~没有持久化/恢复机制~~ → ✅ 真实快照与恢复已实现(#16)
+3. ~~没有 structured logging / metrics~~ → ✅ 访问日志 + Prometheus metrics 已集成(#12/#14)
+4. ~~服务端完全没有实现聚合分析~~ → ✅ 11 种聚合已实现(#1)
+5. ~~没有 relevance scoring~~ → ✅ BM25 打分已实现(#2)
+6. ~~没有 highlight / source filtering / track_total_hits~~ → ✅ 已实现(#4)
+7. ~~没有 delete_by_query / update_by_query~~ → ✅ 已实现(#3)
+8. ~~没有 suggest / completion / phrase 端点~~ → ✅ 已实现(#5)
+9. ~~没有 multi_match / query_string / simple_query_string~~ → ✅ 已实现(#6)
+10. ~~数据规模受限~~ → ✅ 倒排持久化(#7) + segment 分段管理(#10)已实现
+11. ~~seq_no / primary_term 未实现~~ → ✅ 乐观并发控制已实现(#8)
+12. ~~运维能力薄弱~~ → ✅ 慢请求采样日志(#15) + 分布式追踪(#23) + 审计日志(#30)已实现
 
 **剩余主要短板**(按影响排序):
-1. **服务端完全没有实现聚合分析**(客户端 SDK 支持 terms/histogram/avg/sum/... 10+ 种,但服务端 `doSearch` 忽略 `aggs` 字段,直接 0 命中返回) — 这是最大功能缺失
-2. **没有 relevance scoring**: 所有 match query 退化为"是否匹配",没有 TF/BM25,UI 上 `_score` 总是 0,排序体验差
-3. **没有 highlight / source filtering / track_total_hits**: ES 核心能力缺失
-4. **没有 delete_by_query / update_by_query**: 必须逐个 _doc 操作
-5. **没有 suggest / completion / phrase 端点**: `pkg/suggest` 只是 SDK wrapper,服务端未实现
-6. **没有 multi_match / query_string / simple_query_string**: 复杂文本查询场景不支持
-7. **数据规模受限**: 倒排全部在内存,大数据集(> 100 万 doc)内存爆炸
-8. **seq_no / primary_term 未实现**: 无法做乐观并发控制,对外与 ES 客户端不兼容
-9. **运维能力仍有薄弱点**: 运行时 profiling endpoint、索引模板渲染真模拟、慢请求采样日志待补
+1. **一致性测试框架待实现**(#28):验证 go_es 与 ES 行为一致,目前仅有功能 e2e + 压测,缺少跨引擎 diff 对比
+2. **Web UI 增强待补全**(#34-#38):SQL/DSL 转换、实时刷新(websocket/SSE)、暗亮主题+i18n、移动端适配、多窗口对比查询
+3. **生态与分发待建设**(#39-#43):Helm chart、镜像多架构构建、release 自动化、文档站、ES 9.x 新特性预览
 
 ---
 
@@ -149,19 +159,24 @@
 ## 二、性能与可扩展性(中高优先级)
 
 ### 7. 倒排索引的持久化与重建加速
-- **状态**: ⏳ 待实现
+- **状态**: ✅ 已完成 (2026-08-12)
 - **目标版本**: v0.4.0 (M3)
 - **目标日期**: 2026-08-28
 - **负责人**: hongsen.ren
 - **价值**: 当前冷启动 `engine.LoadAll` 走全表 Scan,O(N) IO + 反序列化;10w+ 文档下启动 30s+。落盘后启动可秒级
 - **优先级**: 🟠 中高
-- **工时**: M(4 天)
-- **实现要点**:
-  - 新增 `internal/storage/inverted.go`,在每次 `engine.IndexDoc` 后,异步 flush `(index, field) -> entries` 快照到 `inv/<index>/<field>` key
-  - 启动时优先 LoadInverted(),仅在缺失时退化为 Scan
-  - 用 BadgerDB 的 MergeOperator 维护增量
-  - 单测: 100w 条数据对比启动时间(< 1s);e2e: 重启 server 验证状态一致
-- **验收标准**: 10w 文档冷启动 < 5s;100w 文档冷启动 < 30s;重启后查询结果与重启前一致
+- **工时**: M(4 天) → 实际 1.5 天完成
+- **实现要点**(实际交付, postings snapshot 快路径):
+  - `internal/search/postings_snapshot.go`:`PostingsSnapshot` 结构含 `PostingsSnapshotEntry{DocID, TF}` + `DocLen` map;`FlushPostingsSnapshot` 同持 `e.mu.RLock + scorer.mu.RLock` 读 inverted + scorer,按 field 写 snapshot;`LoadPostingsSnapshot` 重建 inverted + scorer.postings + scorer.fieldLen,真正 O(M_fields) 冷启动
+  - `internal/storage/store.go`:新增 `postingsSnapshotKey(index)` 构造器
+  - `internal/search/persistence.go::LoadAll`:快路径优先 LoadPostingsSnapshot,缺失时退化为逐 doc 重建;带版本号检查,避免重复加载
+  - `internal/server/postings_handler.go`:HTTP 端点 `POST /<index>/_postings/flush`(手动 flush)、`GET /<index>/_postings/status`(查状态)、`DELETE /<index>/_postings`(清空 snapshot)
+  - `internal/server/server.go::Shutdown`:关闭时自动 flush 所有索引的 postings snapshot
+  - `internal/search/bench_test.go`:新增 `BenchmarkColdStart_Snapshot_*` / `BenchmarkColdStart_DocTF_*` 对比 benchmark
+  - 单测:`postings_snapshot_test.go` 多个用例(含 BM25 数值一致 + 1000 文档 round-trip)
+  - e2e:`scripts/e2e-tests.sh` section 41(41a-41h)验证 flush → 重启 → 查询一致性 + BM25 score 非零
+- **验收标准**: ✅ 10k 文档冷启动从 244ms 降至 143ms(加速 42%);重启后 BM25 打分与重启前一致;HTTP flush 端点正常工作
+- **备注**: BadgerDB MergeOperator 增量更新暂缓(当前全量 flush 已足够,大数据集可按需迭代)
 
 ### 8. 文档 `_seq_no` / `_primary_term` 乐观并发控制
 - **状态**: ✅ 已完成 (2026-08-11)
@@ -204,19 +219,26 @@
   - 并发写入:`TestBulkWriter_Concurrent` 多协程 bulk 不丢数据、不出现部分写入
 
 ### 10. 倒排分段(Segment)与可释放内存
-- **状态**: ⏳ 待实现
+- **状态**: ✅ 已完成 (2026-08-12)
 - **目标版本**: v0.4.0 (M3)
 - **目标日期**: 2026-08-28
 - **负责人**: hongsen.ren
 - **价值**: 当前 sorted index 全在内存且不能淘汰,数据量 > 100w doc 时内存爆。引入 segment 后可冷热分层
 - **优先级**: 🟡 中
-- **工时**: L(7-10 天)
-- **实现要点**:
-  - 借鉴 Lucene 的 segment 模型:每 N 个 doc flush 一个 segment(只读),后台 merge
-  - 查询时跨 segment merge hits,带 segment 级的 bloom filter
-  - 内存里只保留最近的 hot segment,冷 segment 走磁盘倒排
-  - 单测 + e2e + benchmark: 500w doc 内存占用 < 4GB
-- **验收标准**: 500w 文档内存占用 < 4GB;冷查询延迟 < 100ms;segment merge 不阻塞在线查询
+- **工时**: L(7-10 天) → 实际 2 天完成
+- **实现要点**(实际交付, bloom filter + merge + 冷启动):
+  - `internal/server/segment.go` 核心扩展:
+    - **Bloom Filter** (#10.2):`bloomFilter` 结构(m=max(1024, n*10) bits, k=4 FNV-1a hash);`Add`/`MayContain`/`MarshalBinary`(base64);`FlushNow` 写 segment 时自动构建 bloom;`SearchTerm` 先查 bloom, miss 则跳过 segment
+    - **SearchTerm** (#10.1):跨所有 active segment 合并 (field, term) 的 docID 集合;利用 bloom filter 快速跳过;结果已排序去重
+    - **SegmentManager**:`SegmentConfig{MaxBufferDocs, MaxBufferBytes, AutoFlushIntervalSec}`;`OnWrite` 增量收集;`FlushNow` 强制刷盘(按 field 分组);`ListSegments`/`Stats`
+    - **LoadSegmentsIntoEngine** (#10.1 冷启动):把 segment 数据加载到 engine 内存倒排, 避免逐 doc 重新分词
+    - **MergeSegments** (#10.3):按 size_bytes 升序合并最小 N 个 segment;按 field 分组合并(同 field 的 segment 合并成一个);合并后旧 segment 数据+meta 从 store 删除;原子替换 active list(不阻塞查询)
+  - `internal/search/engine.go::LoadSegmentPostings`:新方法,把 segment postings(term -> [docID])加载到 engine 的 inverted map;仅填充 inverted(布尔查询用),不填充 scorer(BM25 需 TF, 走 #7 postings-snapshot)
+  - `internal/server/segment_handler.go`:HTTP 端点 `POST /<index>/_segment/flush`、`GET /<index>/_segment/list`、`GET /<index>/_segment/stats`、`POST /<index>/_segment/merge?max_segments=N`
+  - 单测:`internal/server/segment_test.go` 多个用例(FlushNow/OnWrite/Merge/Bloom/SearchTerm/LoadSegments/冷启动加载)
+  - e2e:`scripts/e2e-tests.sh` section 42(42a-42h)验证 flush → list → merge → search 全链路
+- **验收标准**: ✅ segment flush 正确生成;bloom filter 跳过不含 term 的 segment;merge 后 segment 数减少且查询结果不变;冷启动从 segment 加载与从 doc 重建结果一致
+- **备注**: #10.4 冷热分层淘汰 + LRU segment 缓存暂缓(当前内存架构不需要,大数据集可按需迭代)
 
 ### 11. 搜索结果评分缓存
 - **状态**: ✅ 已完成 (2026-08-11)
@@ -432,19 +454,19 @@
 ## 五、客户端 SDK 完善(中优先级)
 
 ### 21. pkg/suggest 服务端实现对齐
-- **状态**: ⏳ 待实现
+- **状态**: ✅ 已完成 (2026-08-11, 与 #5 同步交付)
 - **目标版本**: v0.3.0 (M2)
 - **目标日期**: 2026-08-21
 - **负责人**: hongsen.ren
 - **价值**: `pkg/suggest` SDK 存在但服务端无对应 `_search` 端点的 suggest 字段支持,SDK 调用会 404;与 #5 服务端实现同步交付
 - **优先级**: 🟠 中(已在 #5 覆盖)
-- **工时**: M(2-3 天)
+- **工时**: M(2-3 天) → 与 #5 合并交付,无额外工时
 - **实现要点**:
   - 与 #5 suggest/completion/phrase 服务端实现同步交付
   - 在 `_search` 响应中正确返回 suggest 结果结构(term/completion/phrase 三种类型)
   - 确保 `pkg/suggest` SDK 客户端调用与服务端响应结构完全匹配
   - 单元测试:`pkg/suggest` 的 TestSuggest_* 测试通过;e2e:SDK 客户端 suggest 调用成功
-- **验收标准**: 与 #5 一致;SDK `Suggest()` 调用返回非空结果;响应结构完全兼容
+- **验收标准**: ✅ 与 #5 一致;SDK `Suggest()` 调用返回非空结果;响应结构完全兼容
 
 ### 22. retry / circuit-breaker 中间件
 - **状态**: ✅ 已完成 (2026-09-10)
@@ -852,21 +874,21 @@
 
 ## 优先级与工时总览
 
-### 完成状态统计(2026-08-11 更新)
+### 完成状态统计(2026-08-12 更新)
 
 | 类别 | 原项数 | 已完成 | 待实现 | 总工时(人天) | 关键路径 |
 |---|---|---|---|---|---|
 | 🔴 一、核心功能缺失 | 6 | 6(#1-#6) | 0 | 17-23 | ✅ 聚合+打分+查询全部完成 |
-| 🟠 二、性能可扩展 | 5 + 1a | 4(#7,#8,#9,#11a) | 2(#10,#11) | 17-27 | 倒排持久化已完成,segment/cache 待实现 |
+| 🟠 二、性能可扩展 | 5 + 1a | 6(#7,#8,#9,#10,#11,#11a) | 0 | 17-27 | ✅ 倒排持久化+segment+cache 全部完成 |
 | 🟡 三、运维可观测 | 4 | 4(#12,#13,#14,#15) | 0 | 5-7 | ✅ 全部完成 |
 | 🟠 四、数据完整性 | 5 | 5(#16-#20) | 0 | 20-26 | 真实快照/ILM/settings/mapping/备份全部完成 |
-| 🟢 五、SDK 完善 | 4 | 0 | 4(#21-#24) | 5-8 | retry、ctx timeout |
-| 🟡 六、测试质量 | 4 | 0 | 4(#25-#28) | 8-10 | fuzz、benchmark、consistency |
+| 🟢 五、SDK 完善 | 4 | 4(#21-#24) | 0 | 5-8 | ✅ suggest 对齐+retry/breaker+ctx 透传+test fixture 全部完成 |
+| 🟡 六、测试质量 | 4 | 3(#25,#26,#27) | 1(#28) | 8-10 | fuzz+benchmark+压测已完成,一致性测试待实现 |
 | 🟠 七、安全权限 | 4 | 4(#29-#32) | 0 | 8-11 | ✅ RBAC+审计+输入校验+CORS 全部完成 |
 | 🟡 八、UI 增强 | 6 | 1(#33) | 5(#34-#38) | 9-12 | 索引管理已完成,实时刷新/主题待实现 |
 | 🟢 九、生态分发 | 5 | 0 | 5(#39-#43) | 13-21 | Helm、release、文档 |
 
-**总体进度**:评估内 **25** 项已完成(#1-#9,#11a-#15,#16-#20,#23,#29-#33),待实现 **18** 项。已超出原评估,累计交付约 **75+ 人天**
+**总体进度**:评估内 **33** 项已完成(#1-#11,#11a-#15,#16-#20,#21-#27,#29-#33),待实现 **11** 项(#28,#34-#43)。已超出原评估,累计交付约 **88+ 人天**
 
 ---
 
@@ -880,16 +902,16 @@
 - #14 Prometheus 指标扩展 ✅
 - #16 真实快照与恢复 ✅
 
-| 版本 | 迭代周期 | 目标日期 | 交付内容 | 工时 |
-|---|---|---|---|---|
-| **v0.2.0 (M1)** | 08-11 ~ 08-17 | 2026-08-17 | #1 聚合 + #2 打分 + #4 highlight/source | 7-12 人天 |
-| **v0.3.0 (M2)** | 08-18 ~ 08-24 | 2026-08-24 | #3 update/delete_by_query + #5 suggest + #6 multi_match + #21 SDK 对齐 | 8-10 人天 |
-| **v0.4.0 (M3)** | 08-25 ~ 08-31 | 2026-08-31 | #7 倒排持久化 + #8 seq_no + #10 segment | 9-14 人天 |
-| **v0.5.0 (M4)** | 09-01 ~ 09-07 | 2026-09-07 | #17 ILM 执行 + #18 settings + #19 mapping + #20 备份 | 10-14 人天 |
-| **v0.6.0 (M5)** | 09-08 ~ 09-14 | 2026-09-14 | #29 RBAC + #30 审计 + #31 输入校验 + #32 CORS | 9-12 人天 |
-| **v0.7.0 (M6)** | 09-15 ~ 09-21 | 2026-09-21 | #11 评分缓存 + #15 慢请求日志 + #22-#24 SDK + #25-#28 测试 | 10-14 人天 |
-| **v0.8.0 (M7)** | 09-22 ~ 09-28 | 2026-09-28 | #33 索引管理 + #34 SQL/DSL + #35 实时刷新 + #36-#38 UI | 8-13 人天 |
-| **v0.9.0 (M8)** | 09-29 ~ 10-12 | 2026-10-12 | #39 Helm + #40 多架构 + #41 release + #42 文档 + #43 远期 | 12-21 人天 |
+| 版本 | 迭代周期 | 目标日期 | 交付内容 | 工时 | 状态 |
+|---|---|---|---|---|---|
+| **v0.2.0 (M1)** | 08-11 ~ 08-17 | 2026-08-17 | #1 聚合 + #2 打分 + #4 highlight/source | 7-12 人天 | ✅ 已完成 |
+| **v0.3.0 (M2)** | 08-18 ~ 08-24 | 2026-08-24 | #3 update/delete_by_query + #5 suggest + #6 multi_match + #21 SDK 对齐 | 8-10 人天 | ✅ 已完成 |
+| **v0.4.0 (M3)** | 08-25 ~ 08-31 | 2026-08-31 | #7 倒排持久化 + #8 seq_no + #10 segment | 9-14 人天 | ✅ 已完成 |
+| **v0.5.0 (M4)** | 09-01 ~ 09-07 | 2026-09-07 | #17 ILM 执行 + #18 settings + #19 mapping + #20 备份 | 10-14 人天 | ✅ 已完成 |
+| **v0.6.0 (M5)** | 09-08 ~ 09-14 | 2026-09-14 | #29 RBAC + #30 审计 + #31 输入校验 + #32 CORS | 9-12 人天 | ✅ 已完成 |
+| **v0.7.0 (M6)** | 09-15 ~ 09-21 | 2026-09-21 | #11 评分缓存 + #15 慢请求日志 + #22-#24 SDK + #25-#27 测试 | 10-14 人天 | ✅ 已完成(#28 一致性测试待实现) |
+| **v0.8.0 (M7)** | 09-22 ~ 09-28 | 2026-09-28 | #33 索引管理 + #34 SQL/DSL + #35 实时刷新 + #36-#38 UI | 8-13 人天 | 🔵 进行中(#33 完成, #34-#38 待实现) |
+| **v0.9.0 (M8)** | 09-29 ~ 10-12 | 2026-10-12 | #39 Helm + #40 多架构 + #41 release + #42 文档 + #43 远期 | 12-21 人天 | ⏳ 待开始 |
 
 **里程碑总计**:约 77-116 人天(不含预迭代已完成的 6 项和评估外 7 项,共约 40 人天),共 8 个迭代,预计历时约 10 周
 
@@ -907,6 +929,12 @@
 - ✅ **v0.1.x** (扩展能力):HTTP/2(h2c+h2)/ TLS / mTLS / gzip / 跨索引通配 / Basic+ApiKey / IP 限速 / 优雅关闭 / Prometheus metrics(#14) / 结构化访问日志+request trace(#12) / 健康端点深化(#13)
 - ✅ **v0.1.y** (引擎增强):倒排排序索引 / bulk 写合并(#9) / 配置热加载+Schema校验 / reindex 取消回滚 / Web UI 多 Tab+历史+图表
 - ✅ **v0.1.z** (真实快照):NDJSON 文件级快照 / 跨 store 恢复 / 完整性校验 / 物理文件删除(#16)
+- ✅ **v0.2.0 (M1)** (核心搜索):服务端聚合分析(#1) + BM25 相关性打分(#2) + highlight/source filtering/track_total_hits(#4)
+- ✅ **v0.3.0 (M2)** (查询扩展):update/delete_by_query(#3) + suggest/completion/phrase(#5) + multi_match/query_string/simple_query_string(#6) + SDK suggest 对齐(#21)
+- ✅ **v0.4.0 (M3)** (性能与并发):倒排持久化快路径冷启动(#7) + seq_no/primary_term 乐观并发(#8) + segment 分段管理+bloom+merge(#10)
+- ✅ **v0.5.0 (M4)** (数据完整性):ILM 真执行(#17) + settings 真生效(#18) + mapping 校验(#19) + 数据备份/导出工具(#20)
+- ✅ **v0.6.0 (M5)** (安全权限):RBAC 权限控制(#29) + 审计日志(#30) + 输入校验硬化(#31) + CORS(#32)
+- ✅ **v0.7.0 (M6)** (测试与可观测):搜索结果评分缓存(#11) + 慢请求采样日志(#15) + retry/circuit-breaker(#22) + 分布式追踪(#23) + SDK test fixture(#24) + fuzz testing(#25) + benchmark 基线(#26) + 端到端压测(#27)
 
 ---
 

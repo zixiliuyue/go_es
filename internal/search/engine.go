@@ -284,6 +284,42 @@ func (e *Engine) SnapshotIndex(index string) map[string]map[string]map[string]st
 	return out
 }
 
+// LoadSegmentPostings 把一个 segment 的倒排数据加载到引擎内存中
+// 用于 #10 冷启动: 从 segment 恢复倒排, 避免逐 doc 重新分词
+//
+// 参数:
+//   - index: 索引名
+//   - field: 字段名
+//   - postings: term -> [docID] (来自 SegmentData.Postings)
+//
+// 返回: 加载的 term 数量
+//
+// 说明:
+//   - 调用方不需要持锁, 本函数自行加 e.mu.Lock
+//   - 仅填充 inverted (布尔查询用), 不填充 scorer (BM25 打分需 TF, segment 不含)
+//   - 若需要 BM25 打分, 应走 #7 postings-snapshot 快路径 (含 TF + DocLen)
+func (e *Engine) LoadSegmentPostings(index, field string, postings map[string][]string) int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.inverted[index] == nil {
+		e.inverted[index] = make(map[string]map[string]map[string]struct{})
+	}
+	if e.inverted[index][field] == nil {
+		e.inverted[index][field] = make(map[string]map[string]struct{})
+	}
+	count := 0
+	for term, docIDs := range postings {
+		if e.inverted[index][field][term] == nil {
+			e.inverted[index][field][term] = make(map[string]struct{}, len(docIDs))
+		}
+		for _, id := range docIDs {
+			e.inverted[index][field][term][id] = struct{}{}
+		}
+		count++
+	}
+	return count
+}
+
 // CreateIndex 在引擎内存中为指定索引预留存储空间
 //
 // 说明:
@@ -309,6 +345,7 @@ func (e *Engine) CreateIndex(index string) {
 // 说明:
 //   - 仅清理内存态(docs/inverted/sortedCache/scorer),
 //     持久层数据由上层(server/storage)负责删除
+//   - 同时失效 postings-snapshot (#7)
 //   - 若索引不存在, 本函数为 no-op
 //
 // 参数:
@@ -323,6 +360,8 @@ func (e *Engine) DeleteIndex(index string) {
 	// 移除 docs 与倒排
 	delete(e.docs, index)
 	delete(e.inverted, index)
+	// 失效 postings-snapshot (不持 e.mu, 内部用 snapshotState.mu)
+	_ = e.InvalidatePostingsSnapshot(index)
 }
 
 // ensureFieldStats 取得字段统计; 若缺失,触发一次重建后返回

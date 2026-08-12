@@ -2176,6 +2176,169 @@ assert_status "DELETE idx_dest -> 200" 200 DELETE "$GO_ES_URL/idx_dest"
 
 rm -f "$DUMP_FILE" "$BULK_BODY"
 
+# ---------- 41. postings-snapshot 持久化 (#7) ----------
+header "41. postings-snapshot 持久化 (#7)"
+TS=$(date +%s)
+PS_IDX="idx_postings_${TS}"
+
+# 41a. 建索引 + 写 5 条 doc
+assert_status "PUT $PS_IDX -> 200" 200 PUT "$GO_ES_URL/$PS_IDX"
+for i in 1 2 3 4 5; do
+  assert_status "PUT $PS_IDX/_doc/$i" 201 PUT "$GO_ES_URL/$PS_IDX/_doc/$i" \
+    "{\"title\":\"hello world doc${i}\",\"cat\":\"tag${i}\"}"
+done
+
+# 41b. flush 前: snapshot 不存在
+assert_status "GET $PS_IDX/_postings/snapshot -> 200" 200 GET "$GO_ES_URL/$PS_IDX/_postings/snapshot"
+if jq -e '.has_snapshot == false' /tmp/last.json >/dev/null 2>&1; then
+  ok "flush 前 has_snapshot=false"
+else
+  fail "flush 前 snapshot" "body=$(head -c 200 /tmp/last.json)"
+fi
+
+# 41c. flush postings snapshot
+assert_status "POST $PS_IDX/_postings/flush -> 200" 200 POST "$GO_ES_URL/$PS_IDX/_postings/flush"
+FIELDS_FLUSHED=$(jq -r '.fields_flushed' /tmp/last.json 2>/dev/null)
+if [ "$FIELDS_FLUSHED" -ge 2 ] 2>/dev/null; then
+  ok "flush 写入 ${FIELDS_FLUSHED} 个 field (title+cat >= 2)"
+else
+  fail "flush fields" "fields_flushed=$FIELDS_FLUSHED"
+fi
+
+# 41d. flush 后: snapshot 存在且版本匹配
+assert_status "GET $PS_IDX/_postings/snapshot -> 200" 200 GET "$GO_ES_URL/$PS_IDX/_postings/snapshot"
+if jq -e '.has_snapshot == true and .version_match == true' /tmp/last.json >/dev/null 2>&1; then
+  ok "flush 后 has_snapshot=true, version_match=true"
+else
+  fail "flush 后 snapshot" "body=$(head -c 200 /tmp/last.json)"
+fi
+
+# 41e. 再写一个 doc, version 不匹配
+assert_status "PUT $PS_IDX/_doc/6" 201 PUT "$GO_ES_URL/$PS_IDX/_doc/6" \
+  '{"title":"new doc","cat":"tag6"}'
+assert_status "GET $PS_IDX/_postings/snapshot -> 200" 200 GET "$GO_ES_URL/$PS_IDX/_postings/snapshot"
+if jq -e '.has_snapshot == true and .version_match == false' /tmp/last.json >/dev/null 2>&1; then
+  ok "写后 version_match=false (版本递增)"
+else
+  fail "写后 version 不匹配" "body=$(head -c 200 /tmp/last.json)"
+fi
+
+# 41f. 重新 flush, 版本再次匹配
+assert_status "POST $PS_IDX/_postings/flush -> 200" 200 POST "$GO_ES_URL/$PS_IDX/_postings/flush"
+assert_status "GET $PS_IDX/_postings/snapshot -> 200" 200 GET "$GO_ES_URL/$PS_IDX/_postings/snapshot"
+if jq -e '.version_match == true' /tmp/last.json >/dev/null 2>&1; then
+  ok "重新 flush 后 version_match=true"
+else
+  fail "重新 flush" "body=$(head -c 200 /tmp/last.json)"
+fi
+
+# 41g. flush 后搜索仍正常 (BM25 打分不受影响)
+assert_status "POST $PS_IDX/_search -> 200" 200 POST "$GO_ES_URL/$PS_IDX/_search" \
+  '{"query":{"match":{"title":"hello"}}}'
+HIT_COUNT=$(jq -r '.hits.total.value // .hits.total' /tmp/last.json 2>/dev/null)
+if [ "$HIT_COUNT" -ge 5 ] 2>/dev/null; then
+  ok "flush 后搜索正常 (hello 命中 ${HIT_COUNT} 条)"
+else
+  fail "flush 后搜索" "hits=$HIT_COUNT"
+fi
+
+# 41h. 清理
+assert_status "DELETE $PS_IDX -> 200" 200 DELETE "$GO_ES_URL/$PS_IDX"
+
+# ---------- 42. segment flush/list/merge (#10) ----------
+header "42. segment flush/list/merge (#10)"
+TS=$(date +%s)
+SEG_IDX="idx_segment_${TS}"
+
+# 42a. 建索引 + 写 5 条 doc
+assert_status "PUT $SEG_IDX -> 200" 200 PUT "$GO_ES_URL/$SEG_IDX"
+for i in 1 2 3 4 5; do
+  assert_status "PUT $SEG_IDX/_doc/$i" 201 PUT "$GO_ES_URL/$SEG_IDX/_doc/$i" \
+    "{\"title\":\"hello world doc${i}\",\"cat\":\"tag${i}\"}"
+done
+
+# 42b. flush 前: segment list 为空
+assert_status "GET $SEG_IDX/_segment/list -> 200" 200 GET "$GO_ES_URL/$SEG_IDX/_segment/list"
+SEG_COUNT=$(jq -r '.count // 0' /tmp/last.json 2>/dev/null)
+if [ "$SEG_COUNT" -eq 0 ] 2>/dev/null; then
+  ok "flush 前 segment count=0"
+else
+  fail "flush 前 segment count" "count=$SEG_COUNT"
+fi
+
+# 42c. flush: 应创建 >= 2 个 segment (title + cat 两个 field)
+assert_status "POST $SEG_IDX/_segment/flush -> 200" 200 POST "$GO_ES_URL/$SEG_IDX/_segment/flush"
+SEG_CREATED=$(jq -r '.segments_created // 0' /tmp/last.json 2>/dev/null)
+if [ "$SEG_CREATED" -ge 2 ] 2>/dev/null; then
+  ok "flush 创建 ${SEG_CREATED} 个 segment (title+cat >= 2)"
+else
+  fail "flush segments_created" "segments_created=$SEG_CREATED"
+fi
+
+# 42d. flush 后: segment list 有内容
+assert_status "GET $SEG_IDX/_segment/list -> 200" 200 GET "$GO_ES_URL/$SEG_IDX/_segment/list"
+SEG_COUNT=$(jq -r '.count // 0' /tmp/last.json 2>/dev/null)
+if [ "$SEG_COUNT" -ge 2 ] 2>/dev/null; then
+  ok "flush 后 segment count=${SEG_COUNT} (>= 2)"
+else
+  fail "flush 后 segment count" "count=$SEG_COUNT"
+fi
+
+# 42e. stats 端点
+assert_status "GET $SEG_IDX/_segment/stats -> 200" 200 GET "$GO_ES_URL/$SEG_IDX/_segment/stats"
+TOTAL_BYTES=$(jq -r '.total_bytes // 0' /tmp/last.json 2>/dev/null)
+if [ "$TOTAL_BYTES" -gt 0 ] 2>/dev/null; then
+  ok "segment stats total_bytes=${TOTAL_BYTES} (> 0)"
+else
+  fail "segment stats total_bytes" "total_bytes=$TOTAL_BYTES"
+fi
+
+# 42f. flush 后搜索仍正常 (数据在内存中不受影响)
+assert_status "POST $SEG_IDX/_search -> 200" 200 POST "$GO_ES_URL/$SEG_IDX/_search" \
+  '{"query":{"match":{"title":"hello"}}}'
+HIT_COUNT=$(jq -r '.hits.total.value // .hits.total' /tmp/last.json 2>/dev/null)
+if [ "$HIT_COUNT" -ge 5 ] 2>/dev/null; then
+  ok "flush 后搜索正常 (hello 命中 ${HIT_COUNT} 条)"
+else
+  fail "flush 后搜索" "hits=$HIT_COUNT"
+fi
+
+# 42g. 再 flush 2 次, 产生更多 segment
+assert_status "POST $SEG_IDX/_segment/flush -> 200" 200 POST "$GO_ES_URL/$SEG_IDX/_segment/flush"
+assert_status "POST $SEG_IDX/_segment/flush -> 200" 200 POST "$GO_ES_URL/$SEG_IDX/_segment/flush"
+assert_status "GET $SEG_IDX/_segment/list -> 200" 200 GET "$GO_ES_URL/$SEG_IDX/_segment/list"
+SEG_COUNT_BEFORE=$(jq -r '.count // 0' /tmp/last.json 2>/dev/null)
+if [ "$SEG_COUNT_BEFORE" -ge 6 ] 2>/dev/null; then
+  ok "3 次 flush 后 segment count=${SEG_COUNT_BEFORE} (>= 6)"
+else
+  fail "3 次 flush 后 segment count" "count=$SEG_COUNT_BEFORE"
+fi
+
+# 42h. merge: 合并到 max_segments=2
+# 注: 2 个 field (title+cat) 各产生 segment, merge 按 field 分组合并
+# 6 segments -> merge 5 -> keep 1 + new 2 (per field) = 3 remaining
+assert_status "POST $SEG_IDX/_segment/merge?max_segments=2 -> 200" 200 POST "$GO_ES_URL/$SEG_IDX/_segment/merge?max_segments=2"
+MERGED=$(jq -r '.segments_merged // 0' /tmp/last.json 2>/dev/null)
+REMAINING=$(jq -r '.remaining_count // 0' /tmp/last.json 2>/dev/null)
+if [ "$MERGED" -ge 1 ] 2>/dev/null && [ "$REMAINING" -lt "$SEG_COUNT_BEFORE" ] 2>/dev/null; then
+  ok "merge 合并 ${MERGED} 个, 剩余 ${REMAINING} 个 (少于合并前 ${SEG_COUNT_BEFORE})"
+else
+  fail "merge" "merged=$MERGED remaining=$REMAINING before=$SEG_COUNT_BEFORE"
+fi
+
+# 42i. merge 后搜索仍正常
+assert_status "POST $SEG_IDX/_search -> 200" 200 POST "$GO_ES_URL/$SEG_IDX/_search" \
+  '{"query":{"match":{"title":"hello"}}}'
+HIT_COUNT=$(jq -r '.hits.total.value // .hits.total' /tmp/last.json 2>/dev/null)
+if [ "$HIT_COUNT" -ge 5 ] 2>/dev/null; then
+  ok "merge 后搜索正常 (hello 命中 ${HIT_COUNT} 条)"
+else
+  fail "merge 后搜索" "hits=$HIT_COUNT"
+fi
+
+# 42j. 清理
+assert_status "DELETE $SEG_IDX -> 200" 200 DELETE "$GO_ES_URL/$SEG_IDX"
+
 # ---------- 总结 ----------
 echo
 printf "${YELLOW}== 总结 ==${NC}\n"

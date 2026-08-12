@@ -47,12 +47,15 @@ type indexPersistence struct {
 	writeBatch map[string]map[string]PersistedTokens
 	// versionCache 缓存当前已知 version (避免每次读 store)
 	versionCache map[string]int64
+	// snapshotState postings-snapshot flush 状态 (#7)
+	snapshotState *postingsSnapshotState
 }
 
 func newIndexPersistence() *indexPersistence {
 	return &indexPersistence{
-		writeBatch:   make(map[string]map[string]PersistedTokens),
-		versionCache: make(map[string]int64),
+		writeBatch:    make(map[string]map[string]PersistedTokens),
+		versionCache:  make(map[string]int64),
+		snapshotState: newPostingsSnapshotState(),
 	}
 }
 
@@ -159,10 +162,16 @@ func (e *Engine) PersistBatch(ops []PersistBatchOp) error {
 }
 
 // LoadAll 优化版 LoadAll
-// 1. 扫 doc/* 拿所有 (index, id, source)
-// 2. 扫 doc-tf/* 拿所有分词结果
-// 3. 内存中既填 docs 也填 inverted
-// 4. 优先用 doc-tf (免去重新分词)
+// 快路径 (#7): 优先读 postings-snapshot/<index>/<field>, 直接填充 inverted
+// 慢路径 (回退): 扫 doc-tf/* 逐 doc 重建倒排
+//
+// 流程:
+//  1. 扫 doc/* 拿所有 (index, id, source) — 必须, _source 查询需要
+//  2. 对每个 index, 尝试 LoadPostingsSnapshot (快路径)
+//     - 成功: inverted 直接填充, 跳过 doc-tf 重建
+//     - 失败/版本不匹配: 回退到 doc-tf 慢路径
+//  3. 慢路径: 扫 doc-tf/*, 逐 doc rebuildDocInvertedFromTokens
+//  4. 重建 scorer.fieldStats (BM25 统计, 不在 snapshot 中)
 func (e *Engine) LoadAll() error {
 	if e.store == nil {
 		return nil
@@ -190,49 +199,93 @@ func (e *Engine) LoadAll() error {
 	}); err != nil {
 		return err
 	}
-	tfCache := make(map[string]PersistedTokens)
-	if err := e.store.Scan([]byte("doc-tf/"), func(k, v []byte) error {
-		rest := strings.TrimPrefix(string(k), "doc-tf/")
-		sep := strings.IndexByte(rest, '/')
-		if sep < 0 {
-			return nil
-		}
-		idx := rest[:sep]
-		id := rest[sep+1:]
-		var pt PersistedTokens
-		if err := jsonUnmarshal(v, &pt); err != nil {
-			return err
-		}
-		tfCache[idx+"/"+id] = pt
-		return nil
-	}); err != nil {
-		return err
+	// 收集所有 index (从 doc rows)
+	indexSet := make(map[string]struct{}, 64)
+	for _, r := range rows {
+		indexSet[r.idx] = struct{}{}
 	}
+	// 快路径: 对每个 index 尝试 LoadPostingsSnapshot
+	// snapshotOK[index] = true 表示该 index 的倒排已从 snapshot 加载, 不需要走 doc-tf
+	snapshotOK := make(map[string]bool, len(indexSet))
 	e.mu.Lock()
-	defer e.mu.Unlock()
-	// 清空 docs (e.inverted 在 rebuildDocInvertedFromTokens 内覆盖式填充)
+	// 清空 docs (inverted 由快路径或慢路径填充)
 	e.docs = make(map[string]map[string]map[string]interface{})
-	// 同时清空 scorer 全量状态
+	// 清空 scorer 全量状态
 	e.scorer.mu.Lock()
 	e.scorer.postings = make(map[string]map[string]map[string]*PostingList)
 	e.scorer.fieldStats = make(map[string]map[string]*FieldStats)
 	e.scorer.fieldLen = make(map[string]map[string]map[string]int)
 	e.scorer.mu.Unlock()
+	for idx := range indexSet {
+		loaded, _, ok, err := e.LoadPostingsSnapshot(idx)
+		if err != nil {
+			e.mu.Unlock()
+			return fmt.Errorf("load postings snapshot for %s: %w", idx, err)
+		}
+		if ok && loaded > 0 {
+			snapshotOK[idx] = true
+		}
+	}
+	// 填 docs map
 	for _, r := range rows {
 		if e.docs[r.idx] == nil {
 			e.docs[r.idx] = make(map[string]map[string]interface{})
 		}
 		e.docs[r.idx][r.id] = r.src
 	}
-	for _, r := range rows {
-		pt, has := tfCache[r.idx+"/"+r.id]
-		e.rebuildDocInvertedFromTokens(r.idx, r.id, r.src, pt, has)
+	e.mu.Unlock()
+	// 慢路径: 对 snapshot 未命中的 index, 走 doc-tf 重建
+	slowIndices := make([]string, 0, len(indexSet))
+	for idx := range indexSet {
+		if !snapshotOK[idx] {
+			slowIndices = append(slowIndices, idx)
+		}
 	}
+	if len(slowIndices) > 0 {
+		tfCache := make(map[string]PersistedTokens)
+		if err := e.store.Scan([]byte("doc-tf/"), func(k, v []byte) error {
+			rest := strings.TrimPrefix(string(k), "doc-tf/")
+			sep := strings.IndexByte(rest, '/')
+			if sep < 0 {
+				return nil
+			}
+			idx := rest[:sep]
+			id := rest[sep+1:]
+			// 只加载慢路径 index 的 doc-tf
+			if _, need := indexSet[idx]; !need {
+				return nil
+			}
+			if snapshotOK[idx] {
+				return nil
+			}
+			var pt PersistedTokens
+			if err := jsonUnmarshal(v, &pt); err != nil {
+				return err
+			}
+			tfCache[idx+"/"+id] = pt
+			return nil
+		}); err != nil {
+			return err
+		}
+		e.mu.Lock()
+		for _, r := range rows {
+			if snapshotOK[r.idx] {
+				continue
+			}
+			pt, has := tfCache[r.idx+"/"+r.id]
+			e.rebuildDocInvertedFromTokens(r.idx, r.id, r.src, pt, has)
+		}
+		e.mu.Unlock()
+	}
+	// 重建 scorer.fieldStats (BM25 统计, 不在 snapshot 中)
+	e.mu.Lock()
 	e.scorer.rebuildFieldStats()
+	e.mu.Unlock()
 	return nil
 }
 
 // LoadIndex 单个索引 LoadAll
+// 快路径 (#7): 优先读 postings-snapshot, 失败回退 doc-tf
 func (e *Engine) LoadIndex(index string) error {
 	if e.store == nil {
 		return nil
@@ -260,6 +313,7 @@ func (e *Engine) LoadIndex(index string) error {
 		delete(e.scorer.postings, index)
 	}
 	e.scorer.mu.Unlock()
+	// 读 doc source
 	if err := e.store.Scan(storage.DocPrefix(index), func(k, v []byte) error {
 		rest := strings.TrimPrefix(string(k), "doc/"+index+"/")
 		var src map[string]interface{}
@@ -274,6 +328,17 @@ func (e *Engine) LoadIndex(index string) error {
 	}); err != nil {
 		return err
 	}
+	// 快路径: 尝试 LoadPostingsSnapshot
+	loaded, _, ok, err := e.LoadPostingsSnapshot(index)
+	if err != nil {
+		return fmt.Errorf("load postings snapshot for %s: %w", index, err)
+	}
+	if ok && loaded > 0 {
+		// 快路径命中, 只需重建 scorer 统计
+		e.scorer.rebuildFieldStats()
+		return nil
+	}
+	// 慢路径: 扫 doc-tf 重建倒排
 	tfCache := make(map[string]PersistedTokens)
 	if err := e.store.Scan(storage.DocTFPrefix(index), func(k, v []byte) error {
 		rest := strings.TrimPrefix(string(k), "doc-tf/"+index+"/")
@@ -357,7 +422,8 @@ type InvertedStats struct {
 }
 
 // RebuildInverted 强制重建某索引的 inverted + scorer
-// 走 doc + doc-tf 路径, 与 LoadAll 一致
+// 走 doc + doc-tf 路径, 与 LoadAll 慢路径一致
+// 重建后失效 postings-snapshot, 确保下次 LoadAll 走慢路径 (用户可显式 FlushPostingsSnapshot 重建快路径)
 func (e *Engine) RebuildInverted(index string) (InvertedStats, error) {
 	if e.store == nil {
 		return InvertedStats{Index: index}, fmt.Errorf("no store")
@@ -389,6 +455,8 @@ func (e *Engine) RebuildInverted(index string) (InvertedStats, error) {
 		delete(e.scorer.postings, index)
 	}
 	e.scorer.mu.Unlock()
+	// 失效 postings-snapshot (强制下次 LoadAll 走慢路径)
+	_ = e.InvalidatePostingsSnapshot(index)
 	// 扫 doc
 	type docRow struct {
 		id  string

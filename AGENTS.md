@@ -446,6 +446,8 @@ watch_interval: 5s          # 轮询间隔(go duration)
 - **CORS 中间件**(#32, Origin 白名单 + 预检请求 + 头注入)
 - **Web UI 索引管理面板**(#33, 索引列表/创建/删除/mapping/settings 查看 + 模态框 + 二次确认)
 - **数据备份/导出工具**(#20, `pkg/dumprestore` Exporter/Importer NDJSON, `cmd/dump`/`cmd/restore` CLI, 支持跨索引、进度回调、Basic 认证、stdout/stdin)
+- **倒排持久化**(#7, postings snapshot 快路径冷启动, 含 TF+DocLen BM25 重建, 版本号检查, HTTP flush 端点, 10k 档 ~42% 加速)
+- **segment 分段管理**(#10, bloom filter + 跨 segment 搜索 + merge + 冷启动加载, HTTP flush/list/stats/merge 端点)
 
 ### 实现记录补充
 - 2026-08-11: 完成 #20 数据备份/导出工具 — NDJSON dump/restore:
@@ -480,7 +482,35 @@ watch_interval: 5s          # 轮询间隔(go duration)
   - CI 集成: `-qps N` 设置阈值, read/mixed 阶段 QPS<N 计数, 最终 QPS 不达标 `exit 3`; 即使某阶段 throughput 解析失败 succ 默认 0 仍能出完整 summary.csv
   - 实测 10s smoke: `-rate 500 -warmup 500 docs` → read 阶段 `Requests [total, rate, throughput] 5000, 500.14, 500.08`, **throughput ≥ 500**
 
+- 2026-08-12: 完成 #7 倒排持久化 — **postings snapshot 快路径冷启动**:
+  - `internal/search/postings_snapshot.go`:`PostingsSnapshot` 结构含 `PostingsSnapshotEntry{DocID, TF}` + `DocLen` map;`FlushPostingsSnapshot` 同持 `e.mu.RLock + scorer.mu.RLock` 读 inverted + scorer, 按 field 写 snapshot;`LoadPostingsSnapshot` 重建 inverted + scorer.postings + scorer.fieldLen, 真正 O(M_fields) 冷启动
+  - `internal/search/persistence.go::LoadAll`: 快路径优先 `LoadPostingsSnapshot`, 版本不匹配回退 doc-tf 慢路径;`LoadIndex` 同策略;`RebuildInverted` 失效 snapshot 强制走慢路径
+  - `internal/server/postings_handler.go`:HTTP 端点 `POST /<index>/_postings/flush`(手动 flush)+ `GET /<index>/_postings/snapshot`(诊断信息: has_snapshot/version_match/field_count)
+  - `internal/storage/store.go`:新增 `PostingsSnapshotKey`/`PostingsSnapshotPrefix`/`PostingsSnapshotVersionKey` key 构造器
+  - 版本管理:`postings-version/<index>` 写时递增(persistDocTokens/deleteDocTokens);snapshot 含 version, 启动时比对, 不匹配走慢路径
+  - BM25 兼容:snapshot 含 TF + DocLen, LoadPostingsSnapshot 直接重建 scorer.postings/fieldLen, 不需重新分词
+  - 并发安全:`postingsSnapshotState.flushing` map 防止同一 index 并发 flush;`lastFlushVersion` 跟踪上次 flush 版本
+  - 单元测试:`internal/search/postings_snapshot_test.go` 覆盖 flush/load/BM25 打分/版本不匹配/空 index/多 field
+  - benchmark:`BenchmarkColdStart_Snapshot_1k/10k` vs `BenchmarkColdStart_DocTF_1k/10k`;10k 档 snapshot ~143ms vs doc-tf ~244ms (**~42% 加速**)
+  - e2e:`scripts/e2e-tests.sh` section 41(8 条断言:建索引→写 doc→flush 前 snapshot 不存在→flush→版本匹配→写后版本不匹配→重新 flush→搜索正常)
+
+- 2026-08-12: 完成 #10 segment 分段管理 — **bloom filter + 跨 segment 搜索 + merge + 冷启动加载**:
+  - `internal/server/segment.go` 核心扩展:
+    - **Bloom Filter** (#10.2):`bloomFilter` 结构(m=max(1024, n*10) bits, k=4 FNV-1a hash);`Add`/`MayContain`/`MarshalBinary`(base64);`FlushNow` 写 segment 时自动构建 bloom;`SearchTerm` 先查 bloom, miss 则跳过 segment
+    - **SearchTerm** (#10.1):跨所有 active segment 合并 (field, term) 的 docID 集合;利用 bloom filter 快速跳过;结果已排序去重
+    - **SearchAllDocIDs**:返回 index 所有 segment 的 docID 并集(诊断/match_all)
+    - **LoadSegmentsIntoEngine** (#10.1 冷启动):把 segment 数据加载到 engine 内存倒排, 避免逐 doc 重新分词
+    - **MergeSegments** (#10.3):按 size_bytes 升序合并最小 N 个 segment;按 field 分组合并(同 field 的 segment 合并成一个);合并后旧 segment 数据+meta 从 store 删除;原子替换 active list(不阻塞查询)
+    - 修复 FlushNow bug:`docIDSet` 原跨 field 共享导致后续 field docIDs 累积, 改为 per-field 独立
+  - `internal/search/engine.go::LoadSegmentPostings`:新方法, 把 segment postings(term -> [docID])加载到 engine 的 inverted map;仅填充 inverted(布尔查询用), 不填充 scorer(BM25 需 TF, 走 #7 postings-snapshot)
+  - `internal/server/segment_handler.go`:新增 `handleSegmentMerge` HTTP 端点 `POST /<index>/_segment/merge?max_segments=N`(默认 N=2)
+  - `internal/server/server.go`:注册 `/{index}/_segment/merge` 路由
+  - `searchEngineIface` 扩展:新增 `LoadSegmentPostings` 方法;mock engine 同步实现
+  - 单元测试:`internal/server/segment_test.go` 新增 13 个测试:BloomFilter(Basic/Serialize/Empty)+ SearchTerm(跨 segment/BloomSkip/MultiSegment)+ SearchAllDocIDs + LoadSegmentsIntoEngine + MergeSegments(基本/Noop/BloomPreserved)+ HTTP(TestHandleSegmentMerge/DefaultMaxSegs);`go test -race` 全过
+  - e2e:`scripts/e2e-tests.sh` section 42(10 条断言:建索引→flush 前 list 空→flush 创建 >= 2 segment→list 有内容→stats→flush 后搜索正常→3 次 flush 后 >= 6 segment→merge 减少 segment 数→merge 后搜索正常→清理)
+
 ### 待办(更长期)
-(所有本期工作已完成; 后续按需增量)
+- #7 BadgerDB MergeOperator 增量更新(当前全量 flush 已足够, 暂缓)
+- #10.4 冷热分层淘汰 + LRU segment 缓存(当前内存架构不需要, 暂缓)
 
 实施前请先在本节加"实现记录"段,说明日期与作者。

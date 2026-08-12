@@ -56,6 +56,7 @@ services:
       - GO_ES_URL=http://go_es_server:9200
     volumes:
       - ./scripts/e2e-tests.sh:/e2e-tests.sh:ro
+      - ./scripts/consistency-test.sh:/consistency-test.sh:ro
     entrypoint: ["sh", "/e2e-tests.sh"]
     networks: [testnet]
 

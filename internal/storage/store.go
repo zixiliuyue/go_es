@@ -320,6 +320,22 @@ func PostingsVersionKey(index string) []byte {
 	return []byte("postings-version/" + index)
 }
 
+// PostingsSnapshotPrefix 单个 field 的 postings 快照前缀
+// postings-snapshot/<index>/<field> -> {version, postings: {term: [docID]}}
+func PostingsSnapshotPrefix(index string) []byte {
+	return []byte("postings-snapshot/" + index + "/")
+}
+
+// PostingsSnapshotKey 单个 field 的 postings 快照键
+func PostingsSnapshotKey(index, field string) []byte {
+	return []byte("postings-snapshot/" + index + "/" + field)
+}
+
+// PostingsSnapshotVersionKey postings 快照版本号(上次 flush 时的 postings-version)
+func PostingsSnapshotVersionKey(index string) []byte {
+	return []byte("postings-snapshot-version/" + index)
+}
+
 // IngestKey Ingest 管道键
 func IngestKey(name string) []byte {
 	return []byte("ingest/" + name)

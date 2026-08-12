@@ -252,6 +252,23 @@ func (s *Server) Shutdown(ctx context.Context) {
 	if s.sessionMgr != nil {
 		s.sessionMgr.Stop()
 	}
+	// 优雅关闭: flush 所有索引的 postings-snapshot, 加速下次冷启动 (#7)
+	if s.engine != nil && s.store != nil {
+		for _, idx := range s.allIndexNames() {
+			fields, took, err := s.engine.FlushPostingsSnapshot(idx)
+			if err != nil {
+				s.logger.Warn("postings-snapshot flush 失败",
+					zap.String("index", idx), zap.Error(err))
+				continue
+			}
+			if fields > 0 {
+				s.logger.Info("postings-snapshot flushed",
+					zap.String("index", idx),
+					zap.Int("fields", fields),
+					zap.Int64("took_ms", took))
+			}
+		}
+	}
 	// 关闭 exporters, flush 剩余数据
 	if s.remoteWriter != nil {
 		s.remoteWriter.Close()
@@ -556,9 +573,24 @@ func (s *Server) dispatchIndex(w http.ResponseWriter, r *http.Request, index str
 		s.handleSegmentStats(w, r, index)
 		return
 	}
+	// /{index}/_segment/merge
+	if len(rest) >= 2 && rest[0] == "_segment" && rest[1] == "merge" && method == http.MethodPost {
+		s.handleSegmentMerge(w, r, index)
+		return
+	}
 	// /{index}/_inverted/info
 	if len(rest) >= 2 && rest[0] == "_inverted" && rest[1] == "info" && method == http.MethodGet {
 		s.handleInvertedInfo(w, r, index)
+		return
+	}
+	// /{index}/_postings/flush  (#7 postings-snapshot flush)
+	if len(rest) >= 2 && rest[0] == "_postings" && rest[1] == "flush" && method == http.MethodPost {
+		s.handlePostingsFlush(w, r, index)
+		return
+	}
+	// /{index}/_postings/snapshot  (#7 snapshot 诊断)
+	if len(rest) >= 2 && rest[0] == "_postings" && rest[1] == "snapshot" && method == http.MethodGet {
+		s.handlePostingsSnapshotInfo(w, r, index)
 		return
 	}
 	http.NotFound(w, r)

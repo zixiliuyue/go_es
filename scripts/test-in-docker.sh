@@ -5,6 +5,7 @@
 #   scripts/test-in-docker.sh            # 跑测试后清理容器
 #   scripts/test-in-docker.sh -k         # 保留容器(供手动调试)
 #   scripts/test-in-docker.sh -s         # 跳过镜像重建
+#   scripts/test-in-docker.sh -c         # 额外跑一致性测试(ES vs go_es diff)
 #
 # 退出码: 测试全部通过 -> 0; 任意一步失败 -> 1
 #
@@ -17,10 +18,12 @@ set -euo pipefail
 
 KEEP=0
 SKIP_BUILD=0
+RUN_CONSISTENCY=0
 for a in "$@"; do
   case "$a" in
     -k|--keep)  KEEP=1 ;;
     -s|--skip-build) SKIP_BUILD=1 ;;
+    -c|--consistency) RUN_CONSISTENCY=1 ;;
     -h|--help)
       sed -n '2,18p' "$0"; exit 0 ;;
     *) echo "unknown flag: $a" >&2; exit 2 ;;
@@ -92,6 +95,19 @@ if [[ $rc -ne 0 ]]; then
   echo "[test-in-docker] 容器日志(尾部):"
   $COMPOSE logs --tail=80 es go_es_server || true
   exit 1
+fi
+
+# ---------- 一致性测试 (ES vs go_es 行为 diff) ----------
+if [[ $RUN_CONSISTENCY -eq 1 ]]; then
+  echo "[test-in-docker] 运行一致性测试 (ES vs go_es)..."
+  set +e
+  $COMPOSE run --rm --entrypoint sh tester /consistency-test.sh
+  rc=$?
+  set -e
+  if [[ $rc -ne 0 ]]; then
+    echo "[test-in-docker] 一致性测试失败 rc=$rc"
+    exit 1
+  fi
 fi
 
 # ---------- schema 校验 e2e (host-side, 在容器外验证) ----------
