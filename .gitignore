@@ -37,3 +37,7 @@ Thumbs.db
 # Environment
 .env
 .env.*
+
+# Load test / benchmark output artifacts
+loadtest-*/
+bench/

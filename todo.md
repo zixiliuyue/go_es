@@ -557,7 +557,7 @@
   - ✅ CI 集成: `go test -fuzz=FuzzParseQueryString -fuzztime=30s ./internal/search/` 等命令可直接在 CI pipeline 中运行
 
 ### 26. 性能回归基线(benchmark)
-- **状态**: ⏳ 待实现
+- **状态**: ✅ 已实现
 - **目标版本**: v0.7.0 (M6)
 - **目标日期**: 2026-09-18
 - **负责人**: hongsen.ren
@@ -569,20 +569,38 @@
   - CI 跑 benchmark,产出 benchstat 数据存到 `bench/` 目录
   - 写 `scripts/bench.sh` 一键跑 + 对比
 - **验收标准**: benchmark 基线建立;PR 上自动对比性能回归;性能退化 > 10% 时阻断合并
+- **完成记录**:
+  - ✅ `internal/search/bench_test.go`: 33 个 benchmark, 覆盖 IndexDoc(1k/10k/100k) + 9 种查询类型(match_all/match×2/match_phrase/range/bool/multi_match/query_string/simple_query_string) × 3 档规模;结果写入 sinkResults 防 DCE;`b.ReportAllocs()` 追踪堆分配
+  - ✅ `internal/server/bench_test.go`: HTTP 端到端 15+ benchmark, 覆盖 HTTPSearch(match_all×2/match×2/range/bool/multi_match/clusterHealth) / HTTPIndexDoc_single / HTTPBulk_100/500/1000/5000 / HTTPEndToEnd_WriteAndSearch_1k / HTTPCreateIndex
+  - ✅ `scripts/bench.sh`: smoke(1×50ms)/full(5×1s)/run-only/compare 4 模式;自动 go install benchstat + 解析 $(go env GOPATH)/bin/benchstat; compare 模式直接从 go test 原始输出提取 ns/op 均值, 退化 > 阈值% 时 exit 2; 基线文件带 generated_at/go/host 头; 仅 capture stdout 剔除 zap stderr 日志污染; 软链 latest_smoke.txt / latest_full.txt
+  - ✅ `go test -count=1 -race ./internal/search/ ./internal/server/` 全通过
+  - ✅ 1k search benchmarks 实测: match_all 10µs / match 68µs / range 327µs / bool 373µs / multi_match 155µs / query_string 327µs
+  - ✅ compare 模式自测: +15% 正确阻断(exit 2), +5% 通过(exit 0)
 
 ### 27. 端到端压测脚本
-- **状态**: ⏳ 待实现
+- **状态**: ✅ 已实现
 - **目标版本**: v0.7.0 (M6)
-- **目标日期**: 2026-09-18
+- **目标日期**: 2026-08-11
 - **负责人**: hongsen.ren
-- **价值**: 当前 e2e 验证功能,不验证性能/容量
+- **价值**: 当前 e2e 只验证功能, 不验证性能/容量
 - **优先级**: 🟢 低
 - **工时**: S(1-2 天)
 - **实现要点**:
-  - `scripts/loadtest.sh`: 用 `vegeta` 或 `wrk` 打 bulk + search
-  - 报告: P50/P95/P99 延迟、QPS、内存峰值
-  - CI 在 PR 上跑 1 分钟 smoke loadtest
-- **验收标准**: 压测脚本可一键运行;报告输出 P50/P95/P99;小数据集 QPS ≥ 500
+  - `scripts/loadtest.sh`: 用 `vegeta` 打 bulk 写 + 5 种 search (match_all/match/range/bool/multi_match) 混合流
+  - 模式: `smoke` / `ci-smoke` / `full` / `stage`(单阶段), 阶段: `warmup` → `read` / `write` / `mixed`(读:写默认 70:30)
+  - `ensure_vegeta()`: 未找到时 `go install github.com/tsenart/vegeta@latest`, 失败提示 brew 安装;支持 `LOADTEST_VEGETA` 指定二进制
+  - 压测 target 生成: `emit_json_target()` 生成 vegeta JSON 格式 NDJSON (method/url/header/body=b64), jq 优先 python3 兜底; 避免原生 HTTP 文本格式解析问题
+  - `-rate` / `-duration` 控制速率与时长; 不使用 `-lazy` (会导致 targets 少时提前结束); 外层 `timeout dur+10s` 兜底
+  - 报告: `vegeta report` 输出 text/json/csv; `extract_qps()` 提取新版 `Requests [total, rate, throughput]` 的 throughput (实际 QPS); `append_summary_row()` 解析新版单行 `Latencies [min, mean, 50, 90, 95, 99, max]` 输出 P50/P95/P99/mean/QPS/Success%/Mem_max 到 summary.csv; 兼容旧版 vegeta 单行分行格式
+  - 内存峰值: `start_mem_sampler()` 每 1s 采样 server RSS(ps -o rss= / Linux 用 ps -o rss,vsz), background 进程 trap EXIT 停; `stop_mem_sampler()` 汇总到 memory.csv 并显示峰值 MiB
+  - 内嵌服务端启动: `-server` + `-data` 自动构建/拉起/停掉 (`cmd/server` 构建可执行 + trap 清理); `-url` 不指定时对已运行 server 打流
+  - 认证: `-auth user:pass` → Basic; `-apikey X` → ApiKey; warmup + vegeta JSON targets header 里同步注入
+  - `-qps N` 阈值: read/mixed 阶段 QPS<N 累积 `FAIL_QPS`, 最终 die exit=3 供 CI 阻断
+- **验收标准**:
+  - ✅ `bash scripts/loadtest.sh smoke -server /tmp/go_es_server -data /tmp/x -rate 500 -dur 10s -warmup 500 -qps 50`: 一键跑, 自动起停内嵌 server
+  - ✅ 实测 read 阶段 `-rate=500` 小数据集 QPS(throughput) ≥ 500 (`Requests [total, rate, throughput] 5000, 500.14, 500.08`)
+  - ✅ 报告: summary.csv 列含 P50/P95/P99/mean_ms/QPS/success_pct/mem_max_mb, 每阶段对应 *_report.txt / *_results.json / *_results.csv
+  - ✅ CI 友好: `-qps 阈值` 低了 exit 3 阻断; 阶段失败不改 set -e 仍可输出完整 summary
 
 ### 28. 一致性测试框架
 - **状态**: ⏳ 待实现

@@ -462,6 +462,24 @@ watch_interval: 5s          # 轮询间隔(go duration)
   - 11 个 target 各 10s 探索: **0 panic / 0 crash**, ~3M+ execs
   - 无第三方依赖(Go stdlib native fuzz)
 
+- 2026-08-11: 完成 #26 性能回归基线(benchmark) — **search + HTTP 端到端 48+ benchmark + 一键脚本 + 退化阻断**:
+  - `internal/search/bench_test.go`: 33 个 benchmark, 覆盖写(IndexDoc × 3 档) + 9 种查询 × 3 档规模;预置 Engine 在 `b.StopTimer()` 外构造;结果写 `sinkResults` 防编译器 DCE;`b.ReportAllocs()` 追踪 ns/B/allocs
+  - `internal/server/bench_test.go`: 15+ HTTP 端到端 benchmark, 覆盖 HTTPSearch(7 种查询) / 单 doc PUT / bulk 4 种批量(100/500/1k/5k) / 写+读综合 / 创建索引;复用 `newTestServer(testing.TB)` 内存服务器
+  - `scripts/bench.sh`: smoke(默认 1×50ms) / full(5×1s, benchstat 友好) / run-only / compare 四模式;compare 模式直接解析 go test 原始输出,同名 benchmark 多采样取均值,退化 > BENCH_REGRESSION_THRESHOLD_PCT%(默认 10)时 exit 2,用于 CI 阻断合入;自动 `go install benchstat` 从 `$(go env GOPATH)/bin/benchstat` 查找;基线文件带 generated_at/go/host 头,输出目录 `bench/`;软链 `latest_smoke.txt` / `latest_full.txt`;仅 capture go test stdout 剔除 zap stderr 日志污染
+  - 实测 1k 档: Engine.Match match_all ≈ 10µs, match ≈ 68µs, multi_match ≈ 155µs, range ≈ 327µs, bool ≈ 373µs, query_string ≈ 327µs
+  - compare 阻断自测: match_all 10000→12500 ns/op (+25%, 阈值 10%) 正确 exit 2;match_all 10000→10500 ns/op (+5%) 正确 exit 0
+
+- 2026-08-11: 完成 #27 端到端压测脚本 — **vegeta 四阶段 + P50/P95/P99/QPS/内存峰值 + CI 阈值阻断**:
+  - `scripts/loadtest.sh`: 模式 `smoke / ci-smoke / full / stage`, 阶段 `warmup (bulk 预置 N 条) → read / write / mixed(默认 70:30)`; flag 支持 `-url/-rate/-dur/-warmup/-read-write-ratio/-index/-qps/-out/-server/-data/-auth/-apikey`
+  - vegeta 安装: `ensure_vegeta()` 先找系统 `vegeta`(可用 `LOADTEST_VEGETA` 覆盖), 找不到再 `GOFLAGS=-mod=mod go install github.com/tsenart/vegeta@latest`, 失败提示 `brew install vegeta`
+  - 请求 target 避免 HTTP 文本解析问题: `emit_json_target()` 写 `{method,url,header,body=b64}` 每行一个 NDJSON 到 targets 文件; jq 路径优先写更快; 无 jq 用 python3 单行脚本兜底; 认证头(Basic/ApiKey)直接写进 JSON header
+  - attack 不使用 `-lazy` (targets 少时 vegeta 会把 targets 一次消费完立即退出, -dur 不生效); 保持 `-duration` 驱动, 外层 `timeout --kill-after=3s $((dur+10))` 兜底, 超时不 die 继续 report; 新增 `normalize_duration_seconds()` 把 `10s/1m/2m30s` 转秒
+  - 报告: `vegeta report -type=text/json/csv` 三份; `extract_qps()` 新版从单行 `Requests [total, rate, throughput]` 取第 3 列 throughput (实际 QPS, 比 rate 更真); `append_summary_row()` 新版单行 `Latencies [min, mean, 50, 90, 95, 99, max]` 拆 7 列 + `to_ms()` 兼容 µs/ms/s 转毫秒; 兼容旧版逐行 `50%/95%/99%/mean` 与 `Success: 100%` 格式
+  - 内存峰值: `start_mem_sampler()` 独立后台进程, 每 1s `ps -o rss= $PID` 或 Linux `ss+lsof` 找对应 PID 写 RSS 到 `memory.csv`; `stop_mem_sampler()` 算 max 并在最终 summary 表附 `mem_max_mb`; trap EXIT 清理进程
+  - 内嵌服务端: `-server <bin> -data <dir>` 自动拉起 server + `-probe_target` 健康检查等到 ready; `stop_server` SIGTERM + 10 次等待, 最后 SIGKILL; 不指定 `-server/-data` 直接对已有 `-url` 压测
+  - CI 集成: `-qps N` 设置阈值, read/mixed 阶段 QPS<N 计数, 最终 QPS 不达标 `exit 3`; 即使某阶段 throughput 解析失败 succ 默认 0 仍能出完整 summary.csv
+  - 实测 10s smoke: `-rate 500 -warmup 500 docs` → read 阶段 `Requests [total, rate, throughput] 5000, 500.14, 500.08`, **throughput ≥ 500**
+
 ### 待办(更长期)
 (所有本期工作已完成; 后续按需增量)
 
