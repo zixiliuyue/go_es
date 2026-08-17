@@ -3,7 +3,7 @@ module github.com/zixiliuyue/go_es
 go 1.25.12
 
 require (
-	github.com/dgraph-io/badger/v4 v4.9.5
+	github.com/dgraph-io/badger/v4 v4.9.6
 	github.com/elastic/go-elasticsearch/v8 v8.19.6
 	github.com/gogo/protobuf v1.3.2
 	github.com/golang/snappy v1.0.0
